@@ -19,11 +19,16 @@ fi
 ln -sfn "eigen-${EIGEN_VER}" "$DIR/thirdparty/eigen3"
 
 # nlohmann/json 单头（json_shim.cpp 用；同样不入库）
+# 先写 .part 再改名，避免网络中断留下不完整文件被误当成已就绪
 JSON_VER="3.11.3"
-if [ ! -f "$DIR/thirdparty/json.hpp" ]; then
+JSON_MIN=500000
+json_size=0
+[ -f "$DIR/thirdparty/json.hpp" ] && json_size=$(wc -c < "$DIR/thirdparty/json.hpp" | tr -d ' ')
+if [ "$json_size" -lt "$JSON_MIN" ]; then
   echo "[build_probe] 下载 nlohmann/json ${JSON_VER} ..."
-  curl -sL --max-time 120 -o "$DIR/thirdparty/json.hpp" \
+  curl -fsSL --max-time 300 -o "$DIR/thirdparty/json.hpp.part" \
     "https://raw.githubusercontent.com/nlohmann/json/v${JSON_VER}/single_include/nlohmann/json.hpp"
+  mv "$DIR/thirdparty/json.hpp.part" "$DIR/thirdparty/json.hpp"
 fi
 
 echo "[build_probe] 编译 ik_probe ..."
