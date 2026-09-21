@@ -11,6 +11,9 @@
   python sim/view_traj.py --variant both --sec 10 --fps 30
 
 依赖：mujoco（必需）；写 mp4 另需 imageio + imageio-ffmpeg。
+
+macOS 提示：开窗口需要 `mjpython`（Cocoa 主线程要求），普通 python 直接跑本脚本
+会**自动切换**过去，无需手动加环境变量；`--headless` 则完全不涉及窗口。
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from eval_ik import ProbeSession, pose_row  # noqa: E402
+from gui_boot import ensure_gui_interpreter  # noqa: E402
 from r1_model import R1Sim, rot_err_deg  # noqa: E402
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -180,6 +184,9 @@ def main() -> None:
     ap.add_argument("--headless", action="store_true", help="只算不回放（配 --record 用）")
     ap.add_argument("--seed", type=int, default=4)
     args = ap.parse_args()
+
+    if not args.headless:
+        ensure_gui_interpreter()
 
     variants = ["a5", "a7"] if args.variant == "both" else [args.variant]
     for v in variants:

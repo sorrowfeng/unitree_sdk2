@@ -14,6 +14,8 @@
 // 输出每行：
 //   ok=<0|1> seq=<n> safe=<0|1> disp=<teleop|return_zero|hold|emergency_stop> [q=<2n 个关节角，rad>]
 // ok=0 表示报文被拒绝（畸形 JSON / sequence=0），此时不输出 q。
+// 每行输出后立即 flush：实时消费者（sim/view_pico.py）靠它逐行取结果，
+// 否则 std::cout 接管道时是全缓冲，会攒够 4KB 才吐出来。
 // safe/disp 的判定与主程序共用 r1_pico_safety_policy.h，因此这里的结论
 // 就是 r1_dual_arm_loco.cpp --pico 分支的结论；只有 teleop 与 return_zero
 // 会输出 q（其余处置不更新臂目标）。
@@ -89,7 +91,7 @@ int main(int argc, char** argv) {
 
     r1skeleton::pico::PicoTeleopPacket pkt;
     if (!r1skeleton::pico::parsePicoPacket(line, pkt)) {
-      std::cout << "ok=0 seq=0 safe=0\n";
+      std::cout << "ok=0 seq=0 safe=0\n" << std::flush;
       continue;
     }
 
@@ -152,7 +154,7 @@ int main(int argc, char** argv) {
         os << (i ? " " : "") << q[i];
       }
     }
-    std::cout << os.str() << "\n";
+    std::cout << os.str() << "\n" << std::flush;
   }
   return 0;
 }

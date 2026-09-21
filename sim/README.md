@@ -31,35 +31,149 @@ nlohmann/json 解析后转成同构的 `Any`，于是**解析层也能在本机�
               └─→ (可选) 官方 CasADi/IPOPT IK ─→ q'─┘
 ```
 
-## 安装依赖
+## 环境准备
+
+**本机已装好，直接复用下面这个解释器即可**（项目内**没有** `.venv`，下面的 `$PY` 请先 export 一次）：
 
 ```bash
-# 1) C++ 探针（自动下载 Eigen 3.4 到 sim/thirdparty/，已 gitignore）
-./sim/build_probe.sh
+export PY=/Users/plf/.workbuddy/binaries/python/envs/default/bin/python
+$PY -c "import mujoco,numpy,matplotlib,imageio; print('mujoco', mujoco.__version__)"   # 自检，应打印 3.13.0
+```
 
-# 2) Python 侧（建议用隔离 venv）
+换机器时也可以自建 venv，然后把 `PY` 指向它：
+
+```bash
 python3 -m venv .venv && .venv/bin/pip install mujoco numpy matplotlib imageio imageio-ffmpeg
 ```
+
+C++ 探针（首次自动下载 Eigen 3.4 到 `sim/thirdparty/`，已 gitignore）：
+
+```bash
+./sim/build_probe.sh     # 产出 sim/build/{ik_probe,pico_pipeline_test,test_pico_parse}
+```
+
+改过 `example/r1/high_level/` 的头文件后，**必须重跑一次 `build_probe.sh`**，
+否则探针还是旧逻辑（探针不在 CMake 构建里，不会自动跟着更新）。
+
+## 快速开始（推荐顺序）
+
+```bash
+cd <repo>/unitree_sdk2
+export PY=/Users/plf/.workbuddy/binaries/python/envs/default/bin/python
+
+./sim/check_syntax.sh        # ① 秒级：主程序/工具语法自检，看两个文件是否 0 error
+$PY sim/eval_ik.py           # ② 约 3s：IK 精度 + 出图到 sim/out/
+$PY sim/safety_scenarios.py  # ③ 约 27s：7 个安全场景回归，末行应打印 ALL SCENARIOS PASSED
+$PY sim/view_traj.py --variant both    # ④ 开 MuJoCo 窗口，肉眼双臂跟踪（关窗即退出）
+# ⑤ 接 PICO 的实时可视化：$PY sim/view_pico.py --variant a5 --port 9999（需另开终端发报文，见下文）
+```
+
+前两步不需要 MuJoCo 窗口，适合改完代码立刻回归；第 ④ 步是给人看的主观检查。
 
 ## 用法
 
 ```bash
 # 精度评估：FK 交叉校验 + IK 残差统计 + 轨迹跟踪 → 图表 + JSON
-.venv/bin/python sim/eval_ik.py                      # a5 + a7 全跑
-.venv/bin/python sim/eval_ik.py --variant a5 --n-ik 500
+$PY sim/eval_ik.py                      # a5 + a7 全跑
+$PY sim/eval_ik.py --variant a5 --n-ik 500
 #   产物：sim/out/{v}_ik_error_box.png、{v}_traj_error.png、{v}_traj_xy.png、eval_summary.json
 
 # 可视化回放：MuJoCo 窗口，每只手两个标记球
 #   绿球（下方）= 目标末端（人手给的位置）
 #   红球（上方）= 实际末端（IK 解算后到达的位置）
 #   两球水平对齐 = 跟踪准确；红球相对绿球偏移 = 误差
-.venv/bin/python sim/view_traj.py --variant a5
-.venv/bin/python sim/view_traj.py --variant both --mode ik      # 含 WMA 平滑（实机口径）
-.venv/bin/python sim/view_traj.py --variant both --headless --record sim/out/teleop.mp4
+$PY sim/view_traj.py --variant a5
+$PY sim/view_traj.py --variant both --mode ik      # 含 WMA 平滑（实机口径）
+$PY sim/view_traj.py --variant both --headless --record sim/out/teleop.mp4
+#   注意：--variant both 时 --record 会按变体插后缀，实际写出 teleop_a5.mp4 / teleop_a7.mp4
+#   （离屏渲染可正常工作，会打印 ffmpeg 的 900x640 -> 912x640 resize 提示，属正常）
 
 # 根因诊断：复刻 solveArm 的更新公式，对比"原样/加权/限位"三组
-.venv/bin/python sim/diag_ik_rootcause.py
+$PY sim/diag_ik_rootcause.py
 ```
+
+## 可视化 GUI 验证（两条路径）
+
+本机有两类**互不相同**的 GUI 验证，别混用：
+
+| | 不接 PICO | 接 PICO |
+|---|---|---|
+| 脚本 | `view_traj.py` | `view_pico.py` |
+| 目标位姿从哪来 | MuJoCo 自己生成的关节轨迹，再取官方 URDF 的 FK 真值 | PICO 头显（或 `pico_sim_sender.py`）经 UDP 发来的 OpenXR 位姿 |
+| 实际验证的是 | IK 求解器本身的精度 | 整条遥操作链路（解析 → 安全判据 → 坐标对齐 → IK）在真实数据下的表现 |
+| 需要 PICO 吗 | 不需要 | 需要，或用模拟发送器代替 |
+
+两者窗口里的记号一致：**绿球 = 目标腕位置**，**红球 = 实际腕位置**（IK 解算后 MuJoCo FK 到达的位置）。
+红绿贴合＝跟得准，红球偏移量就是误差。
+
+### 路径 A：不接 PICO
+
+```bash
+$PY sim/view_traj.py --variant both            # A5 / A7 各开一次窗口
+$PY sim/view_traj.py --variant a5 --mode ik    # 含 WMA 平滑（实机主程序口径）
+```
+
+### 路径 B：接 PICO（两个终端）
+
+```bash
+# 终端 1：开窗等报文
+$PY sim/view_pico.py --variant a5 --port 9999
+
+# 终端 2：真 PICO 直接把报文发到本机 9999；没有头显时用模拟发送器
+$PY example/r1/high_level/scripts/pico_sim_sender.py \
+    --host 127.0.0.1 --port 9999 --duration 30
+```
+
+窗口左上角实时显示 `disp=`（`teleop` / `hold` / `return_zero` / `emergency_stop`）与报文序号。
+想用肉眼确认安全判据，直接上带场景的发送器：
+
+```bash
+$PY example/r1/high_level/scripts/pico_sim_sender.py --host 127.0.0.1 --port 9999 \
+    --scenario estop --switch-at 3 --duration 8     # 3 秒后触发急停，手臂应立即停住
+```
+
+`view_pico.py` 只取最新一包（丢弃积压），避免乱序时"补播"旧动作；因此发送 300 包、
+窗口处理 200 出头属于正常，不是丢帧故障。
+
+### HUD 文字为什么容易看不清（两个坑）
+
+`viewer.set_texts()` 的官方 docstring 说第一个参数是 `mjtFontScale`，**这是错的**。
+它最终会原样传给 `mjr_overlay`，而 `mujoco.h` 的声明写得很明确：
+
+```
+// Draw text overlay; font is mjtFont; gridpos is mjtGridPos.
+MJAPI void mjr_overlay(int font, int gridpos, mjrRect viewport, ...);
+```
+
+即只认 **`mjtFont`（`mjFONT_NORMAL=0` / `mjFONT_SHADOW=1` / `mjFONT_BIG=2`）**。
+传 `mjFONTSCALE_150`（整数值 150）是非法值，会被静默降成最小号字：1280px 画布上
+字形只有 15px 高，而 Retina 下 framebuffer 是 2x，换算到屏幕只剩约 7pt。
+
+实测（同一段文字、同一场景，离屏差分量的字形高度）：
+
+| 传入 font | 一行尺寸 | 说明 |
+|---|---|---|
+| `mjFONTSCALE_150`（=150） | 444 x 22 px | 非法值 → 最小号字 |
+| `mjFONT_NORMAL`（=0） | 444 x 22 px | 与上式**逐像素相同** |
+| `mjFONT_BIG`（=2） | 856 x 38 px | 真正的大字，约 2 倍 |
+
+第二个坑：MuJoCo 的 overlay 用的是**内置点阵字体，只覆盖 ASCII**。中文没有字形，
+会渲染成实心方块（小号字时）或干脆消失（大号字时）。所以 HUD 文案必须全英文 ——
+`err 7.69 mm  pkts 215`，而不是 `误差 7.69 mm  包 215`。
+
+`view_pico.py` 已默认用 `mjFONT_NORMAL`（原始字号，一行约 444x22 px）且 HUD 全 ASCII。
+实测 `mjFONT_BIG` 在真实窗口里偏大，故不作默认；嫌小可 `--font big`。
+
+### macOS 开窗须知
+
+`mujoco.viewer.launch_passive()` 要求 Cocoa 事件循环占据真正的 macOS 主线程，
+所以必须由 `mjpython` 启动，普通 python 会直接抛
+``RuntimeError: `launch_passive` requires that the Python script be run under `mjpython` on macOS``。
+
+两个 viewer 都会**自动检测并 `os.execve` 到同目录的 `mjpython`**（实现在 `gui_boot.py`，
+顺带修掉 venv 符号链接导致的 `libpython` dlopen 失败），所以直接
+`$PY sim/view_traj.py` / `$PY sim/view_pico.py` 即可，不用手动设任何环境变量。
+`--headless` 离屏渲染不经过此路径，普通 python 就能跑。
 
 ## PICO 报文全链路测试（无需 PICO、无需机器人）
 
@@ -68,7 +182,7 @@ python3 -m venv .venv && .venv/bin/pip install mujoco numpy matplotlib imageio i
 
 ```bash
 # 1) 生成一批 PICO 报文（用官方 URDF 做 FK 造可达位姿，再按对齐的逆变换打包）
-.venv/bin/python example/r1/high_level/scripts/pico_sim_sender.py \
+$PY example/r1/high_level/scripts/pico_sim_sender.py \
     --dry-run --dump /tmp/pico.jsonl --truth-out /tmp/truth.jsonl --duration 3 --hz 30
 
 # 2) 灌进全链路：报文 -> 解析 -> 安全判据 -> 对齐 -> IK
@@ -88,7 +202,7 @@ python3 -m venv .venv && .venv/bin/pip install mujoco numpy matplotlib imageio i
 
 ```bash
 # 发到机器人（R1 背包）
-.venv/bin/python example/r1/high_level/scripts/pico_sim_sender.py \
+$PY example/r1/high_level/scripts/pico_sim_sender.py \
     --host 192.168.123.164 --port 9999 --duration 60
 
 # 先生成、后回放（机器人侧没有 MuJoCo 时用这个）
@@ -109,7 +223,9 @@ python3 -m venv .venv && .venv/bin/pip install mujoco numpy matplotlib imageio i
 | `build_probe.sh` | 编译探针（自动拉 Eigen） |
 | `r1_model.py` | MuJoCo 模型封装：URDF 加载、关节映射、独立 FK、限位采样 |
 | `eval_ik.py` | L1 精度评估：FK 交叉校验、IK 残差统计、轨迹跟踪、出图 |
-| `view_traj.py` | L2 可视化：MuJoCo 回放 + 目标/实际末端标记 + 可选导出 mp4 |
+| `view_traj.py` | L2 可视化（**不接 PICO**）：MuJoCo 回放 + 目标/实际末端标记 + 可选导出 mp4 |
+| `view_pico.py` | L2 可视化（**接 PICO**）：监听 UDP，实时把 PICO 报文驱动的双臂动作显示出来 |
+| `gui_boot.py` | macOS 开窗适配：自动把普通 python 切到 `mjpython`，并修 libpython 搜索路径 |
 | `diag_ik_rootcause.py` | 发散问题的根因对照实验 |
 | `json_shim.cpp` | 本机补 `unitree::common::FromJsonString`（官方实现在 Linux 库里） |
 | `pico_pipeline_test.cpp` | PICO 报文全链路：解析 → 安全判据 → 对齐 → IK |
@@ -165,7 +281,7 @@ ik-raw : 同上                                    → q[2n]（solveArm，无平
 因此下面的结论就是 `r1_dual_arm_loco.cpp --pico` 分支的结论。
 
 ```bash
-.venv/bin/python sim/safety_scenarios.py      # 一键回归全部场景
+$PY sim/safety_scenarios.py      # 一键回归全部场景
 ```
 
 | 场景 | 期望 | 实测（2026-09-21 修复后） |

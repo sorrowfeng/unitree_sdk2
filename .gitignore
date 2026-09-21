@@ -18,3 +18,7 @@ build
 sim/thirdparty/
 sim/build/
 sim/out/
+
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
