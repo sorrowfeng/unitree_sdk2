@@ -9,8 +9,11 @@
 //
 // 要点（与协议文档一致）：
 //   - 顶层固定字段 + safety / teleop / hmd / controllers / robot_control 等可选模块。
-//   - 运动执行唯一许可：safety.safe_to_execute == true（同时 operator_mode 为
-//     active_stream；return_zero 表示一键回零，stop_signal 表示停止包）。
+//   - 运动执行唯一许可：emergency_stop_latched == false 且 safety.safe_to_execute == true
+//     且 operator_mode == active_stream（见 safeToExecute()）。
+//   - operator_mode 语义：active_stream 连续遥操；return_zero 一键回零
+//     （不要求 active_stream，见 returnZeroRequested()）；stop_signal 停止包。
+//   - 急停闩锁优先级最高，压过包括 return_zero 在内的一切判据。
 //   - pose.position 单位 m；orientation 为 pitch/yaw/roll（deg），同时携带
 //     orientation_quat{x,y,z,w}（OpenXR 原始单位四元数，w 为实部）。
 //     解析端优先用四元数重建姿态（无万向锁），缺省才回退欧拉 ZYX
@@ -153,9 +156,26 @@ struct PicoTeleopPacket {
   PicoRobotControl robot;
 
   bool hasData() const { return sequence > 0; }
-  /// 唯一执行许可：safe_to_execute 且处于连续发送状态。
+
+  /// 急停闩锁：优先级最高，压过其余一切判据（含 return_zero）。
+  bool emergencyStopLatched() const { return safety.emergency_stop_latched; }
+
+  /// 一键回零请求：未闩锁急停，且 operator_mode == "return_zero"。
+  ///
+  /// 注意这里**不要求** safe_to_execute / active_stream：回零期间 PICO 端本就
+  /// 把 operator_mode 置为 return_zero（不是 active_stream），若用 safeToExecute()
+  /// 兜底则该分支永远不可达。回零是操作者的主动请求，只再叠加"包新鲜"即可执行。
+  bool returnZeroRequested() const {
+    return !emergencyStopLatched() && operator_mode == "return_zero";
+  }
+
+  /// 唯一运动执行许可：未闩锁急停 + safe_to_execute + 处于连续发送状态。
+  ///
+  /// 急停闩锁必须在这里挡住：PICO 端可能在置 emergency_stop_latched=true 的
+  /// 同时保持 safe_to_execute=true（两者是两个独立字段），此时旧实现会放行运动。
   bool safeToExecute() const {
-    return safety.safe_to_execute && operator_mode == "active_stream";
+    return !emergencyStopLatched() && safety.safe_to_execute &&
+           operator_mode == "active_stream";
   }
 };
 

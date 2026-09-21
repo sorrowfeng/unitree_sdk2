@@ -9,14 +9,18 @@
 // 用法（stdin 每行一个完整 JSON 报文）：
 //   ./build/pico_pipeline_test --variant a5 --source controllers --frame head_yaw < packets.jsonl
 //   ./build/pico_pipeline_test --variant a5 --raw < packets.jsonl    # 跳过 WMA 平滑
+//   ./build/pico_pipeline_test --variant a5 --rx-age-ms 700 < packets.jsonl   # 模拟掉包
 //
 // 输出每行：
-//   ok=<0|1> seq=<n> safe=<0|1> q=<2n 个关节角，rad>
+//   ok=<0|1> seq=<n> safe=<0|1> disp=<teleop|return_zero|hold|emergency_stop> [q=<2n 个关节角，rad>]
 // ok=0 表示报文被拒绝（畸形 JSON / sequence=0），此时不输出 q。
-// safe=0 表示安全判据未通过（与主程序一致），此时臂目标不更新；
+// safe/disp 的判定与主程序共用 r1_pico_safety_policy.h，因此这里的结论
+// 就是 r1_dual_arm_loco.cpp --pico 分支的结论；只有 teleop 与 return_zero
+// 会输出 q（其余处置不更新臂目标）。
 // ============================================================================
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -24,6 +28,7 @@
 #include <vector>
 
 #include "r1_arm_ik.h"
+#include "r1_pico_safety_policy.h"
 #include "r1_pico_udp.h"
 #include "r1_xr_pose_alignment.h"
 
@@ -53,6 +58,8 @@ int main(int argc, char** argv) {
   // --raw：跳过 WMA 输出平滑，得到"求解器裸精度"。
   // 默认走 ik.solve（含平滑），与 r1_dual_arm_loco.cpp 完全一致。
   const bool raw = hasFlag(argc, argv, "--raw");
+  // --rx-age-ms：模拟收包延时（默认 0 = 刚收到）。用于验证掉包（>=600ms）路径。
+  const double rx_age_ms = std::atof(argValue(argc, argv, "--rx-age-ms", "0").c_str());
 
   if (variant != "a5" && variant != "a7") {
     std::cerr << "[pipeline] unknown --variant: " << variant << " (expect a5|a7)\n";
@@ -86,7 +93,7 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    // 与 r1_dual_arm_loco.cpp 的判据保持一致
+    // 判据与 r1_dual_arm_loco.cpp 共用同一份策略（r1_pico_safety_policy.h）
     const r1skeleton::pico::PicoSide& leftS =
         (source == "teleop") ? pkt.left : pkt.ctrl.left;
     const r1skeleton::pico::PicoSide& rightS =
@@ -94,14 +101,20 @@ int main(int argc, char** argv) {
     const bool src_valid = (source == "teleop")
                                ? (pkt.teleop_valid && pkt.left.valid && pkt.right.valid)
                                : pkt.ctrl.output_valid;
-    const bool safe = pkt.safeToExecute() && src_valid;
+    using r1skeleton::pico::Disposition;
+    const Disposition disp =
+        r1skeleton::pico::decideDisposition(pkt, rx_age_ms, src_valid);
 
     std::ostringstream os;
-    os << "ok=1 seq=" << pkt.sequence << " safe=" << (safe ? 1 : 0);
-    if (safe) {
-      if (pkt.operator_mode == "return_zero") {
-        q.setZero();
-      } else if (leftS.pose.valid && rightS.pose.valid) {
+    os << "ok=1 seq=" << pkt.sequence
+       << " safe=" << (disp == Disposition::kTeleop ? 1 : 0)
+       << " disp=" << r1skeleton::pico::dispositionName(disp);
+
+    if (disp == Disposition::kReturnZero) {
+      // 主程序此处 arm.setTargets(Zero)，等价于把目标置零
+      q.setZero();
+    } else if (disp == Disposition::kTeleop) {
+      if (leftS.pose.valid && rightS.pose.valid) {
         const Eigen::Isometry3d Lxr = leftS.pose.toOpenXrPose();
         const Eigen::Isometry3d Rxr = rightS.pose.toOpenXrPose();
         const Eigen::Isometry3d head = pkt.hmd_live
@@ -130,6 +143,10 @@ int main(int argc, char** argv) {
       } else {
         os << " (pose_invalid)";
       }
+    }
+
+    // 仅 teleop / return_zero 更新臂目标，其余处置下 q 保持不变、不输出
+    if (disp == Disposition::kTeleop || disp == Disposition::kReturnZero) {
       os << " q=";
       for (int i = 0; i < 2 * n; ++i) {
         os << (i ? " " : "") << q[i];

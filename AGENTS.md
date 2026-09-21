@@ -113,13 +113,23 @@ LocoClient ──▶ 机载运控 ai_sport（站立/行走/阻尼/零力矩）
 - 编译错误：`R1ArmController(Variant, const Params& = {})` 中嵌套类默认成员初始化器不可用，
   已改为委托构造 `R1ArmController(Variant)`。**不要改回 `= {}`**。
 - 全量语法校验基线：`r1_dual_arm_loco.cpp` / `r1_tool.cpp` 在 clang 下 0 error。
+  **本机可复现**：`./sim/check_syntax.sh`（用 `sim/shim/mac_syntax_compat.h` 垫掉
+  Linux 专有类型后才轮得到校验我们的代码；垫片只用于 `-fsyntax-only`，不参与构建）。
+- 安全判据顺序错误：`return_zero` 分支曾排在 `if (!safe) continue;` 之后，而
+  `safeToExecute()` 要求 `active_stream`，导致该分支是**死代码**（一键回零永不触发）。
+  同理 `emergency_stop_latched` 未纳入判据，PICO 端只置闩锁位时仍会继续执行运动。
+  已修复：判据集中到 `r1_pico_safety_policy.h::decideDisposition()`，优先级
+  **急停 > 回零 > 保持 > 遥操**，并由 `tests/test_pico_parse.cpp` 覆盖顺序。
+  **不要再把判据写回主循环的 if/else 链**。
 
 **待办（尚未实现）：**
-- `safety.emergency_stop_latched` 已解析但未纳入执行判据；掉包 >600ms 触发阻尼后不会自动重新站立。
 - 头/腰遥操跟随未实现（仅启动回零）。
 - 灵巧手仅 `NullHandDriver`，不驱动实际手。
 - `r1_xr_pose_alignment.h` 腰部偏移 `+0.15x/+0.45z` 为常量，上机需标定。
 - C++ IK 用 DLS 逼近官方 CasADi+IPOPT，非逐位一致。
+
+**设计选择（不是缺陷）：** 掉包（>600 ms）或急停触发阻尼后**不自动重新站立**，
+需操作者显式 `s`（PICO 站立键）。与官方 `xr_teleoperate` 一致，避免链路抖动后自行起身。
 
 ## 6. 部署目标
 

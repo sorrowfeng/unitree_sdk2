@@ -74,7 +74,9 @@ example/r1/high_level/scripts/run_tests.sh
 ```
 
 覆盖：完整 `active_stream` 包解析、四元数/欧拉两条姿态重建路径、OpenXR→机器人对齐、
-`safe_to_execute=false` / `stop_signal` 不可执行、畸形 JSON 与 `sequence=0` 拒绝。
+`safe_to_execute=false` / `stop_signal` 不可执行、`emergency_stop_latched` 不可执行、
+`return_zero` 可执行（但不等于遥操许可）、畸形 JSON 与 `sequence=0` 拒绝，
+以及 `decideDisposition()` 的判据优先级（急停 > 回零 > 保持 > 遥操）。
 
 ## 运行
 
@@ -171,8 +173,14 @@ R1-EDU 的“开发计算单元”（算力背包，Jetson Orin，`192.168.123.1
 
 ## 已知限制 / 待办
 
-- **安全闸门**：`safety.emergency_stop_latched` 已解析但未纳入执行判据（当前仅依赖
-  `safe_to_execute`）；单次掉包超时（>600 ms）会触发阻尼，且之后不会自动重新站立。
+- **安全闸门**：判据集中在 `r1_pico_safety_policy.h`，优先级为
+  **急停闩锁 > 一键回零 > 保持 > 正常遥操**。
+  - 急停（`emergency_stop_latched=true`）= 停移动 + 阻尼，双臂保持；**本端不自动复位**，
+    需操作者显式重新站立（PICO 站立键或 stdin `s`）——与官方 `xr_teleoperate`
+    「双摇杆按下 = Damp()」行为一致。注意本端只看闩锁位，不依赖 PICO 端同时把
+    `safe_to_execute` 置 false（两者是独立字段）。
+  - 单次掉包超时（>600 ms）触发阻尼后同样**不自动站立**，恢复正常后需按 `s` 重新站立。
+    这是刻意的设计选择（避免链路抖动后机器人自行起身），不是缺陷。
 - **头/腰**：启动时回零使能，遥操过程中不跟随（`robot_control.head` 未消费）。
 - **灵巧手**：`NullHandDriver` 只打印 6 路原始值（0..10000），实际驱动需继承 `HandDriver`。
 - **A7**：官方固件未开放 `rt/arm_sdk` 覆盖模式，必须用 `--lowcmd`，且使用前需释放机载运控服务。

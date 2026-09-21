@@ -11,6 +11,7 @@
 #include <iostream>
 
 #include "r1_pico_udp.h"
+#include "r1_pico_safety_policy.h"
 #include "r1_xr_pose_alignment.h"
 
 using namespace r1skeleton;
@@ -119,7 +120,58 @@ int main() {
   CHECK(pkt3.operator_mode == "stop_signal");
   CHECK(pkt3.safeToExecute() == false);
 
-  std::cout << "\n=== 4) 畸形 JSON / sequence=0（必须拒绝）===\n";
+  std::cout << "\n=== 4) 急停闩锁（须不可执行，即使 safe_to_execute=true）===\n";
+  const std::string estop_key = "\"emergency_stop_latched\": false";
+  std::string js5 = js_active;
+  js5.replace(js5.find(estop_key), estop_key.size(),
+              "\"emergency_stop_latched\": true");
+  pico::PicoTeleopPacket pkt5;
+  CHECK(pico::parsePicoPacket(js5, pkt5));
+  CHECK(pkt5.emergencyStopLatched() == true);
+  CHECK(pkt5.safety.safe_to_execute == true);  // 两字段独立，PICO 端可能只置其一
+  CHECK(pkt5.safeToExecute() == false);        // 修复前此处会误判为 true
+  CHECK(pkt5.returnZeroRequested() == false);  // 急停优先级高于回零
+
+  std::cout << "\n=== 5) return_zero（回零请求成立，但不等于遥操许可）===\n";
+  std::string js6 = js_active;
+  js6.replace(js6.find(mode), mode.size(), "\"return_zero\"");
+  pico::PicoTeleopPacket pkt6;
+  CHECK(pico::parsePicoPacket(js6, pkt6));
+  CHECK(pkt6.operator_mode == "return_zero");
+  CHECK(pkt6.safeToExecute() == false);       // 非 active_stream
+  CHECK(pkt6.returnZeroRequested() == true);  // 修复前被 !safe 短路，分支不可达
+
+  std::cout << "\n=== 6) return_zero + 急停闩锁（急停优先）===\n";
+  std::string js7 = js6;
+  js7.replace(js7.find(estop_key), estop_key.size(),
+              "\"emergency_stop_latched\": true");
+  pico::PicoTeleopPacket pkt7;
+  CHECK(pico::parsePicoPacket(js7, pkt7));
+  CHECK(pkt7.returnZeroRequested() == false);
+  CHECK(pkt7.safeToExecute() == false);
+
+  std::cout << "\n=== 7) 判据优先级（decideDisposition：急停 > 回零 > 保持 > 遥操）===\n";
+  using pico::Disposition;
+  // 正常遥操：三条件齐备
+  CHECK(pico::decideDisposition(pkt, 10.0, true) == Disposition::kTeleop);
+  // 掉包（>600ms）与来源无效 -> 保持
+  CHECK(pico::decideDisposition(pkt, 700.0, true) == Disposition::kHold);
+  CHECK(pico::decideDisposition(pkt, 10.0, false) == Disposition::kHold);
+  // 回零：不要求 active_stream，也不要求 src_valid（目标为零位）
+  CHECK(pico::decideDisposition(pkt6, 10.0, false) == Disposition::kReturnZero);
+  // 陈旧的回零包不再执行
+  CHECK(pico::decideDisposition(pkt6, 700.0, true) == Disposition::kHold);
+  // 回零 + 急停：急停优先
+  CHECK(pico::decideDisposition(pkt7, 10.0, false) == Disposition::kEmergencyStop);
+  // 急停：包陈旧 / 来源无效 / safe_to_execute=true 都不影响
+  CHECK(pico::decideDisposition(pkt5, 700.0, false) == Disposition::kEmergencyStop);
+  // 阻尼触发条件
+  CHECK(pico::holdTriggersDamp(pkt6, 10.0) == false);  // 回零包：非 stop_signal
+  CHECK(pico::holdTriggersDamp(pkt2, 10.0) == false);  // safe=false：只停移动
+  CHECK(pico::holdTriggersDamp(pkt, 700.0) == true);   // 掉包 -> 阻尼
+  CHECK(pico::holdTriggersDamp(pkt3, 10.0) == true);   // stop_signal -> 阻尼
+
+  std::cout << "\n=== 8) 畸形 JSON / sequence=0（必须拒绝）===\n";
   pico::PicoTeleopPacket pkt4;
   CHECK(pico::parsePicoPacket("{not json", pkt4) == false);
   CHECK(pico::parsePicoPacket("{\"sequence\":0}", pkt4) == false);

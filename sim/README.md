@@ -113,7 +113,11 @@ python3 -m venv .venv && .venv/bin/pip install mujoco numpy matplotlib imageio i
 | `diag_ik_rootcause.py` | 发散问题的根因对照实验 |
 | `json_shim.cpp` | 本机补 `unitree::common::FromJsonString`（官方实现在 Linux 库里） |
 | `pico_pipeline_test.cpp` | PICO 报文全链路：解析 → 安全判据 → 对齐 → IK |
+| `safety_scenarios.py` | 安全场景一键回归（7 个场景，断言判据优先级） |
+| `check_syntax.sh` | 本机对主程序/工具做 `-fsyntax-only` 全量语法校验 |
 | `shim/sys/*.h` | Linux 专有头（`sysinfo.h`/`timerfd.h`）的 macOS 空占位 |
+| `shim/mac_syntax_compat.h` | 语法校验垫片（pthread 自旋锁 / sched 常量），**不参与构建** |
+| `../example/r1/high_level/r1_pico_safety_policy.h` | 判据优先级（急停 > 回零 > 保持 > 遥操） |
 | `../example/r1/high_level/scripts/pico_sim_sender.py` | PICO 模拟发送器（UDP-JSON v3） |
 
 ## 探针接口（供二次开发）
@@ -156,27 +160,56 @@ ik-raw : 同上                                    → q[2n]（solveArm，无平
 
 ### 安全判据场景验证
 
-`pico_sim_sender.py --scenario X` + `pico_pipeline_test` 的组合，实测各分支判定与预期一致：
+判据已集中到 `../example/r1/high_level/r1_pico_safety_policy.h::decideDisposition()`，
+优先级 **急停 > 回零 > 保持 > 遥操**。`pico_pipeline_test` 与主程序**共用**该策略，
+因此下面的结论就是 `r1_dual_arm_loco.cpp --pico` 分支的结论。
 
-| 场景 | 期望 | 实测 |
+```bash
+.venv/bin/python sim/safety_scenarios.py      # 一键回归全部场景
+```
+
+| 场景 | 期望 | 实测（2026-09-21 修复后） |
 |---|---|---|
-| `normal` | 全程执行 | 全 1 ✅ |
-| `estop`（切换后 `emergency_stop_latched=true`） | 切换后停 | 切换后全 0 ✅ |
-| `unsafe`（`safe_to_execute=false`） | 全程停 | 全 0 ✅ |
-| `lost`（手部 `quality=lost`） | 切换后停 | 切换后全 0 ✅ |
-| `stop_signal` | 切换后停 + 阻尼 | 切换后全 0 ✅ |
-| `return_zero` | 切换后回零 | 判定为"停"，但**回零分支不可达** ⚠️ |
+| `normal` | 全程执行 | 110 帧全为 `teleop` ✅ |
+| `estop`（只置闩锁位，`safe_to_execute` 仍为 `true`） | 切换后停 | `seq>=42` 起恒为 `emergency_stop` ✅ |
+| `unsafe`（`safe_to_execute=false`） | 全程停 | 110 帧全为 `hold` ✅ |
+| `lost`（手部 `quality=lost`） | 切换后停 | `seq>=42` 起恒为 `hold` ✅ |
+| `stop_signal` | 切换后停 + 阻尼 | `seq>=43` 起恒为 `hold` ✅ |
+| `return_zero` | 切换后回零 | `seq>=42` 起恒为 `return_zero`，`q≡0` ✅ |
+| `stale`（正常包 + `--rx-age-ms 700`） | 全程停 | 110 帧全为 `hold` ✅ |
 
-**测试中发现两个安全判据缺口**（见 `../AGENTS.md` 第 5 节待办）：
+### 修复的两个安全判据缺口（2026-09-21 已修）
 
-1. **`emergency_stop_latched` 未纳入执行判据**。`safeToExecute()` 只看
-   `safe_to_execute && operator_mode=="active_stream"`。若 PICO 端只置急停位、
-   而 `safe_to_execute` 仍为 `true`，机器人不会停。复现：
-   ```bash
-   # 取一个正常包，改成 estop=true 但 safe_to_execute 保持 true
-   ./sim/build/pico_pipeline_test --variant a5 < /tmp/pkt_estop_gap.jsonl   # → safe=1
-   ```
-2. **`return_zero` 分支是死代码**。`r1_dual_arm_loco.cpp` 里 `if (!safe) { ...; continue; }`
-   先于 `if (operator_mode == "return_zero")` 执行，而 `return_zero` 时
-   `safeToExecute()` 恒为 false（模式不是 `active_stream`），所以回零那段永远不执行。
-   实测 `--scenario return_zero` 下判定为"停"（符合预期但不会回零）。
+1. **`emergency_stop_latched` 未纳入执行判据**。`safeToExecute()` 原先只看
+   `safe_to_execute && operator_mode=="active_stream"`：PICO 端若只置急停位、
+   而 `safe_to_execute` 仍为 `true`，机器人不会停。
+   → 现在 `safeToExecute()` 第一位就判 `!emergency_stop_latched`，
+   且急停处置为「停移动 + 阻尼」，与官方 `xr_teleoperate` 的软急停（`Damp()`）一致。
+2. **`return_zero` 是死代码**。主循环里 `if (!safe) { …; continue; }` 排在
+   `if (operator_mode == "return_zero")` 之前，而 `return_zero` 时 `safeToExecute()`
+   恒为 false（模式不是 `active_stream`），一键回零永远不触发。
+   → 判据下沉为 `PicoTeleopPacket::returnZeroRequested()` + 纯函数
+   `decideDisposition()`，并用单测锁住顺序（`tests/test_pico_parse.cpp` 第 7 节）。
+
+**反向对照**（用修复前的 `HEAD` 版本编译同一份测试程序，验证新断言确实抓得住）：
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| `estop` 切换后仍判定可执行的帧数 | **69 / 69**（继续执行运动） | 0 / 69 |
+| `return_zero` 切换后真正输出关节目标的帧数 | **0 / 69**（分支不可达） | 69 / 69（`q≡0`） |
+
+## 本机语法校验（`check_syntax.sh`）
+
+`r1_dual_arm_loco.cpp` / `r1_tool.cpp` 依赖 unitree SDK 头文件，而 SDK 会 include
+Linux 专有头（`sys/sysinfo.h`、`pthread` 自旋锁、sched 策略常量），在 macOS 上直接
+编译会先挂在 SDK 里，看不到自己代码的错误。`check_syntax.sh` 用 `-fsyntax-only`
+加一层垫片（`shim/mac_syntax_compat.h`，**只用于语法校验，不参与构建**）来绕开，
+于是 AGENTS.md 里那条「clang 下 0 error」的基线可以在本机随时复现：
+
+```bash
+./sim/check_syntax.sh                 # 两个目标文件
+./sim/check_syntax.sh r1_tool.cpp     # 指定文件
+```
+
+本次修复中，主程序漏 include `r1_pico_safety_policy.h` 就是被这个脚本抓住的
+（sim 侧不编译主程序，否则会一路漏到 VM 构建才暴露）。

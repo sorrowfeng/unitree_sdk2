@@ -55,6 +55,7 @@
 #include "r1_arm_controller.h"
 #include "r1_hand_interface.h"
 #include "r1_pico_udp.h"
+#include "r1_pico_safety_policy.h"
 #include "r1_xr_pose_alignment.h"
 
 namespace {
@@ -327,12 +328,14 @@ int main(int argc, char** argv) {
     if (pico_frame == "head_trans") ref_mode = r1skeleton::xralign::RefMode::kHeadTranslation;
 
     constexpr double kTargetHz = 30.0;   // 官方 args.frequency 默认值
+    constexpr double kStaleMs = r1skeleton::pico::kDefaultStaleMs;  // 掉包判据（停 + 阻尼）
     const double pico_dt = 1.0 / kTargetHz;
     std::cout << "[pico] frame mode: " << pico_frame
               << " | target loop " << kTargetHz << " Hz (官方 teleop 默认 30 Hz)"
               << " | WMA 关节平滑 4 帧 [0.4,0.3,0.2,0.1] + 250Hz 发布速度限幅 30 rad/s" << std::endl;
     bool first_packet = true;
     bool ever_safe = false;
+    bool estop_active = false;         // 急停闩锁的边沿检测（进/出各日志一次）
     while (!g_quit.load()) {
       r1skeleton::pico::PicoTeleopPacket pkt;
       double rx_age_ms = 0.0;
@@ -353,17 +356,57 @@ int main(int argc, char** argv) {
       const bool src_valid = (pico_source == "teleop") ? (pkt.teleop_valid && pkt.left.valid && pkt.right.valid)
                                                        : pkt.ctrl.output_valid;
 
-      const bool fresh = rx_age_ms < 600.0;
-      const bool safe = pkt.safeToExecute() && fresh && src_valid;
-      safe_to_move.store(safe);
+      // 判据优先级集中在 r1_pico_safety_policy.h：急停 > 回零 > 保持 > 遥操
+      const auto disp = r1skeleton::pico::decideDisposition(pkt, rx_age_ms, src_valid, kStaleMs);
+      safe_to_move.store(disp == r1skeleton::pico::Disposition::kTeleop);  // 回零/急停/保持期间底盘不动
 
-      if (!safe) {
-        // 停：不更新双臂目标（250Hz 内部循环保持上次目标）；底盘速度归零
-        cmd_vx.store(0); cmd_vy.store(0); cmd_vyaw.store(0);
-        if (!fresh || pkt.operator_mode == "stop_signal") damp_cmd.store(true);
-        r1skeleton::HandAction idle;
-        idle.mode = r1skeleton::HandAction::Mode::kIdle;
-        hand.update(idle, hand_state, pico_dt);
+      r1skeleton::HandAction idle;
+      idle.mode = r1skeleton::HandAction::Mode::kIdle;
+
+      switch (disp) {
+        // ① 急停闩锁：停移动 + 进入阻尼（对齐官方 xr_teleoperate「双摇杆按下 = 软急停
+        //    = Damp()」），双臂保持最后目标、不再接收新指令。恢复必须由操作者显式
+        //    重新站立（PICO 站立键或 stdin 's'）——本端不自动复位，避免闩锁解除瞬间
+        //    机器人自行起身，与官方行为一致。
+        case r1skeleton::pico::Disposition::kEmergencyStop: {
+          cmd_vx.store(0); cmd_vy.store(0); cmd_vyaw.store(0);
+          if (!estop_active) {
+            estop_active = true;
+            damp_cmd.store(true);
+            std::cout << "[pico] 急停闩锁：停止移动 + 阻尼，双臂保持。"
+                         "恢复需操作者显式重新站立（stdin 's'），本端不自动复位。"
+                      << std::endl;
+          }
+          hand.update(idle, hand_state, pico_dt);
+          break;
+        }
+        // ② 一键回零：双臂目标归零，底盘停止。只要求包新鲜——回零期间 operator_mode
+        //    不是 active_stream，用 safeToExecute() 兜底会让该分支永不可达。
+        case r1skeleton::pico::Disposition::kReturnZero: {
+          cmd_vx.store(0); cmd_vy.store(0); cmd_vyaw.store(0);
+          arm.setTargets(Eigen::VectorXd::Zero(2 * n), zero_tau);
+          hand.update(idle, hand_state, pico_dt);
+          break;
+        }
+        // ③ 保持：未安全/掉包/来源无效。不更新双臂目标（250Hz 内部循环保持上次目标），
+        //    底盘速度归零；掉包或 stop_signal 时额外触发阻尼。
+        case r1skeleton::pico::Disposition::kHold: {
+          cmd_vx.store(0); cmd_vy.store(0); cmd_vyaw.store(0);
+          if (r1skeleton::pico::holdTriggersDamp(pkt, rx_age_ms, kStaleMs)) damp_cmd.store(true);
+          hand.update(idle, hand_state, pico_dt);
+          break;
+        }
+        case r1skeleton::pico::Disposition::kTeleop:
+          break;
+      }
+
+      // 急停解除的边沿日志（disp != kEmergencyStop 时才会走到这里）
+      if (disp != r1skeleton::pico::Disposition::kEmergencyStop && estop_active) {
+        estop_active = false;
+        std::cout << "[pico] 急停闩锁已解除（等待操作者重新站立）。" << std::endl;
+      }
+
+      if (disp != r1skeleton::pico::Disposition::kTeleop) {
         std::this_thread::sleep_for(std::chrono::duration<double>(pico_dt));
         continue;
       }
@@ -375,9 +418,7 @@ int main(int argc, char** argv) {
       }
 
       // ——双臂：所选来源位姿 -> OpenXR 4x4 -> 对齐 -> IK——
-      if (pkt.operator_mode == "return_zero") {
-        arm.setTargets(Eigen::VectorXd::Zero(2 * n), zero_tau);
-      } else if (leftS.pose.valid && rightS.pose.valid) {
+      if (leftS.pose.valid && rightS.pose.valid) {
         const Eigen::Isometry3d Lxr = leftS.pose.toOpenXrPose();
         const Eigen::Isometry3d Rxr = rightS.pose.toOpenXrPose();
         Eigen::Isometry3d head = pkt.hmd_live ? pkt.hmd_pose.toOpenXrPose()

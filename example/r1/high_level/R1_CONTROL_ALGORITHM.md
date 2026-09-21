@@ -106,7 +106,8 @@ PICO HandLink App (openxr-app, UDP JSON v3, 默认 9999 端口, 100~1000 Hz)
    ▼
 r1_pico_udp.h :: PicoUdpThread（最新包 + 收包时间戳）
    ▼
-安全闸门：safety.safe_to_execute && operator_mode=="active_stream" && 收包新鲜(<600ms)
+安全闸门：r1_pico_safety_policy.h 判据优先级 急停 > 回零 > 保持 > 遥操
+          （急停闩锁 / safe_to_execute+active_stream+收包新鲜(<600ms) / return_zero）
    ▼
 位姿重建：R = Rz(yaw)·Ry(pitch)·Rx(roll)（与 PICO 端 EulerDegToQuaternion 互逆）
    ▼
@@ -129,8 +130,9 @@ HandAction：robot_control.hands（0..10000）优先，否则手柄 trigger/grip
 - `teleop`：ApplyCalibration() 后的位姿（pose - 校准锚点，坐标系已相对化），此时不要再叠加 head 减法，否则双参考系错位；仅供对比调试。
 
 注意：
-- 运动执行唯一许可 = 同一包 `safety.safe_to_execute`；`stop_signal`/心跳超时 → 停 + 阻尼；
-  `return_zero` 期间双臂目标归零（PICO 端一键回零）。
+- 判据优先级见 `r1_pico_safety_policy.h`：急停闩锁 > 一键回零 > 保持 > 正常遥操。
+  急停 = 停移动 + 阻尼且不自动复位（需显式站立）；`stop_signal`/心跳超时 → 停 + 阻尼；
+  `return_zero` 期间双臂目标归零（PICO 端一键回零），该分支不要求 `active_stream`。
 - 位姿已同步 PICO 端新增的 `orientation_quat{x,y,z,w}`：`r1_pico_udp.h` 的 `toOpenXrPose()`
   优先用原始四元数重建姿态（无万向锁），缺省才回退欧拉 ZYX 重建。
 - head-yaw 参考系 = 官方 xr_teleoperate 默认；若你的 PICO 校准已把位姿相对化，

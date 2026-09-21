@@ -17,7 +17,9 @@
 #
 # 场景（--scenario，对应主程序的各条安全分支）：
 #   normal      全程 active_stream + safe_to_execute=true
-#   estop       T 秒后 emergency_stop_latched=true（应停住且不恢复）
+#   estop       T 秒后 emergency_stop_latched=true，且 safe_to_execute 仍为 true
+#               ——刻意用最严苛的"两字段不一致"情形：本端必须只看闩锁位就停，
+#               不允许依赖 PICO 端同时把 safe_to_execute 也置 false。
 #   unsafe      全程 safe_to_execute=false（应不更新臂目标）
 #   lost        T 秒后手部 quality=lost（应判 src_valid=false）
 #   dropout     T 秒后完全停发（应触发 >600ms 阻尼）
@@ -234,7 +236,9 @@ def build_packet(seq: int, t: float, tl: np.ndarray, tr: np.ndarray,
     grip = 0.5 + 0.5 * math.sin(2 * math.pi * 0.15 * t)
 
     if scenario == "estop" and t >= switch_at:
-        estop, safe = True, False
+        # 只置闩锁位、safe_to_execute 保持 true：这是最难的一道。
+        # 若接收端只看 safe_to_execute，就会继续执行运动（历史 bug）。
+        estop = True
     elif scenario == "unsafe":
         safe = False
     elif scenario == "lost" and t >= switch_at:
@@ -285,7 +289,7 @@ def build_packet(seq: int, t: float, tl: np.ndarray, tr: np.ndarray,
             "safe_to_execute": safe,
             "sample_age_ms": 5.0,
             "max_sample_age_ms": 250.0,
-            "reason": "ok" if safe else f"sim:{scenario}",
+            "reason": "ok" if (safe and not estop) else f"sim:{scenario}",
         },
         "teleop": {
             "output_valid": quality == "live",
