@@ -10,3 +10,6 @@ build
 # macOS
 .DS_Store
 ._*
+
+# 本地 Agent 工作记录（个人状态，不纳入版本管理）
+.workbuddy/
