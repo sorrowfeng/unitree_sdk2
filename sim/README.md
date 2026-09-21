@@ -1,7 +1,7 @@
 # sim/ — 本机双臂遥操仿真验证
 
-在 **macOS 本机**（不需要机器人、不需要 DDS）验证 `example/r1/high_level/r1_arm_ik.h`
-的 IK 精度，并做可视化回放。
+在 **macOS 本机**（不需要机器人、不需要 DDS）验证 `example/r1/high_level/` 的
+IK 精度、坐标对齐、以及 PICO 报文全链路，并做可视化回放。
 
 ## 为什么能本机跑
 
@@ -9,10 +9,16 @@
 |---|---|---|
 | `r1_arm_ik.h`（FK / IK） | 仅 Eigen | ✅ |
 | `r1_xr_pose_alignment.h`（对齐） | 仅 Eigen | ✅ |
-| `r1_pico_udp.h`（UDP 解析） | + SDK 的 `FromJsonString()`（实现在 Linux 私有库里） | ❌ 缺符号 |
+| `r1_pico_udp.h`（UDP 解析） | SDK 的 `FromJsonString()`（官方实现在 Linux 私有库里） | ✅ 由 `json_shim.cpp` 补实现 |
 | `r1_arm_controller.h`（臂控） | unitree DDS 封装 | ❌ 需 SDK |
 
-因此本层验证聚焦 **运动学 + IK**（遥操准确性的核心），UDP/DDS 部分留到 VM 或上机。
+`r1_pico_udp.h` 能本机编译的关键：`Any`/`JsonMap`/`JsonArray` 都是 header-only
+的标准类型，只有 `FromJsonString` 一个函数在库里。`json_shim.cpp` 用
+nlohmann/json 解析后转成同构的 `Any`，于是**解析层也能在本机完整运行**。
+另有 `sim/shim/sys/*.h` 两个空占位，用来绕开 `unitree/common/decl.hpp`
+里 include 的 Linux 专有头（`sys/sysinfo.h`、`sys/timerfd.h`，本层并不使用其符号）。
+
+只有 DDS 臂控层需要上机验证。
 
 ## 方法论：避免自证循环
 
@@ -55,6 +61,46 @@ python3 -m venv .venv && .venv/bin/pip install mujoco numpy matplotlib imageio i
 .venv/bin/python sim/diag_ik_rootcause.py
 ```
 
+## PICO 报文全链路测试（无需 PICO、无需机器人）
+
+`pico_pipeline_test` 与 `r1_dual_arm_loco.cpp` 的 `--pico` 分支**同源**：同一组头文件、
+同一套默认参数（`--pico-source controllers` / `--pico-frame head_yaw`），只去掉 DDS。
+
+```bash
+# 1) 生成一批 PICO 报文（用官方 URDF 做 FK 造可达位姿，再按对齐的逆变换打包）
+.venv/bin/python example/r1/high_level/scripts/pico_sim_sender.py \
+    --dry-run --dump /tmp/pico.jsonl --truth-out /tmp/truth.jsonl --duration 3 --hz 30
+
+# 2) 灌进全链路：报文 -> 解析 -> 安全判据 -> 对齐 -> IK
+./sim/build/pico_pipeline_test --variant a5 < /tmp/pico.jsonl > /tmp/solved.txt
+./sim/build/pico_pipeline_test --variant a5 --raw < /tmp/pico.jsonl   # 跳过 WMA 平滑
+
+# 3) 用 MuJoCo 独立 FK 比对 /tmp/solved.txt 与 /tmp/truth.jsonl 的 EE 位姿
+```
+
+**验证闭环**：模拟器在机器人腰部系给出目标腕位姿 → 反推成 OpenXR 位姿发出 →
+被测程序解析 + 正向对齐 + IK → 解出的关节角再用 MuJoCo 独立 FK 算 EE 位姿 →
+与最初的目标比。全链路往返误差 1e-13 mm（已单独验证），因此残差只反映 IK 与平滑。
+
+### 模拟发送器 `pico_sim_sender.py`
+
+发 UDP-JSON v3 报文到机器人（`example/r1/high_level/r1_dual_arm_loco.cpp --pico` 的输入）。
+
+```bash
+# 发到机器人（R1 背包）
+.venv/bin/python example/r1/high_level/scripts/pico_sim_sender.py \
+    --host 192.168.123.164 --port 9999 --duration 60
+
+# 先生成、后回放（机器人侧没有 MuJoCo 时用这个）
+... --dump /tmp/pico.jsonl ;  ... --replay /tmp/pico.jsonl --host 192.168.123.164
+
+# 安全场景：normal | estop | unsafe | lost | dropout | stop_signal | return_zero
+... --scenario estop --switch-at 1.5
+```
+
+`--pose-mode`：`wave`（关节空间正弦，默认）/ `circle`（任务空间圆周，半径 3cm）。
+两者都先经官方 URDF 的 FK，保证发出的位姿是 R1 可达的。
+
 ## 文件
 
 | 文件 | 作用 |
@@ -65,6 +111,10 @@ python3 -m venv .venv && .venv/bin/pip install mujoco numpy matplotlib imageio i
 | `eval_ik.py` | L1 精度评估：FK 交叉校验、IK 残差统计、轨迹跟踪、出图 |
 | `view_traj.py` | L2 可视化：MuJoCo 回放 + 目标/实际末端标记 + 可选导出 mp4 |
 | `diag_ik_rootcause.py` | 发散问题的根因对照实验 |
+| `json_shim.cpp` | 本机补 `unitree::common::FromJsonString`（官方实现在 Linux 库里） |
+| `pico_pipeline_test.cpp` | PICO 报文全链路：解析 → 安全判据 → 对齐 → IK |
+| `shim/sys/*.h` | Linux 专有头（`sysinfo.h`/`timerfd.h`）的 macOS 空占位 |
+| `../example/r1/high_level/scripts/pico_sim_sender.py` | PICO 模拟发送器（UDP-JSON v3） |
 
 ## 探针接口（供二次开发）
 
@@ -92,3 +142,41 @@ ik-raw : 同上                                    → q[2n]（solveArm，无平
 
 > 全域采样下的大误差来自两方面：① 5 DOF 手臂跟踪 6D 全姿态的固有折衷；
 > ② 目标本身可能不满足关节限位。真实遥操工作空间在任务空间采样一档。
+
+### PICO 报文端到端（A5，3s @30Hz，sway 幅度 0.2 rad）
+
+| 口径 | EE 位置 mean / max | EE 姿态 mean / max |
+|---|---|---|
+| `--raw`（跳过 WMA 平滑） | **0.108 mm / 0.358 mm** | 0.013° / 0.037° |
+| `ik.solve`（含 WMA，= 实机口径） | **7.69 mm / 16.74 mm** | 1.53° / 2.80° |
+
+> 两者差值即 **WMA 平滑的滞后**：`weights=[0.4,0.3,0.2,0.1]` 相当于约 1 帧群延迟，
+> 跟随误差 ≈ 手速 × 滞后时间。这一行为与官方 `WeightedMovingFilter` 一致，不是缺陷；
+> 若要更跟手，可改 `r1_arm_ik.h::smooth()` 的权重（代价是抖动变大）。
+
+### 安全判据场景验证
+
+`pico_sim_sender.py --scenario X` + `pico_pipeline_test` 的组合，实测各分支判定与预期一致：
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| `normal` | 全程执行 | 全 1 ✅ |
+| `estop`（切换后 `emergency_stop_latched=true`） | 切换后停 | 切换后全 0 ✅ |
+| `unsafe`（`safe_to_execute=false`） | 全程停 | 全 0 ✅ |
+| `lost`（手部 `quality=lost`） | 切换后停 | 切换后全 0 ✅ |
+| `stop_signal` | 切换后停 + 阻尼 | 切换后全 0 ✅ |
+| `return_zero` | 切换后回零 | 判定为"停"，但**回零分支不可达** ⚠️ |
+
+**测试中发现两个安全判据缺口**（见 `../AGENTS.md` 第 5 节待办）：
+
+1. **`emergency_stop_latched` 未纳入执行判据**。`safeToExecute()` 只看
+   `safe_to_execute && operator_mode=="active_stream"`。若 PICO 端只置急停位、
+   而 `safe_to_execute` 仍为 `true`，机器人不会停。复现：
+   ```bash
+   # 取一个正常包，改成 estop=true 但 safe_to_execute 保持 true
+   ./sim/build/pico_pipeline_test --variant a5 < /tmp/pkt_estop_gap.jsonl   # → safe=1
+   ```
+2. **`return_zero` 分支是死代码**。`r1_dual_arm_loco.cpp` 里 `if (!safe) { ...; continue; }`
+   先于 `if (operator_mode == "return_zero")` 执行，而 `return_zero` 时
+   `safeToExecute()` 恒为 false（模式不是 `active_stream`），所以回零那段永远不执行。
+   实测 `--scenario return_zero` 下判定为"停"（符合预期但不会回零）。
