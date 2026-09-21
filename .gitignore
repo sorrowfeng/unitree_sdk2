@@ -13,3 +13,8 @@ build
 
 # 本地 Agent 工作记录（个人状态，不纳入版本管理）
 .workbuddy/
+
+# sim/ 本机仿真验证：第三方依赖(Eigen)、构建产物、输出图表/视频
+sim/thirdparty/
+sim/build/
+sim/out/
