@@ -1,0 +1,24 @@
+# 统一文本文件换行符为 LF，避免工作区被整体转成 CRLF 后产生大量假 diff
+* text=auto eol=lf
+
+# 二进制文件不参与换行符转换
+*.a binary
+*.so binary
+*.so.* binary
+*.o binary
+*.bin binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+
+# 脚本/构建文件强制 LF，保证在 Linux VM 上可直接执行
+*.sh text eol=lf
+CMakeLists.txt text eol=lf
+*.cmake text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
