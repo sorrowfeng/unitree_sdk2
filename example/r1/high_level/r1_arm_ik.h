@@ -220,17 +220,32 @@ class R1DualArmIk {
       Eigen::Vector3d e_pos = p_t - T.translation();
       // 旋转误差：R_cur * R_t^T 的旋转向量（官方 log3(R_ee * R_target^T)）
       Eigen::Vector3d e_rot = rotationVector(T.linear() * R_t.transpose());
-      // 误差按官方权重缩放后进入 DLS
+      // 误差按官方权重缩放后进入 DLS。
+      // 注意姿态项取负：线性化后位置项需要 J_p·dq = p_t - p（即 +e_pos），
+      // 而姿态项需要 J_w·dq = log(R_t * R_cur^T) = -rotvec(R_cur * R_t^T)（即 -e_rot）。
+      // 若姿态项也用 +e_rot，它会与位置项反向对抗，误差稍大即发散到限位。
       Eigen::VectorXd e(6);
-      e << std::sqrt(w_pos_) * e_pos, std::sqrt(w_rot_) * e_rot;
+      e << std::sqrt(w_pos_) * e_pos, -std::sqrt(w_rot_) * e_rot;
 
       const double err = e.norm();
       if (err < 1e-4) break;
 
       Eigen::MatrixXd J = kin_.jacobian(q, left);   // 6 x n
+      // 权重必须同时作用于雅可比与误差：求解 min ||W^0.5 (J dq - r)||，
+      // 即 J_w = W^0.5 J、e = W^0.5 r。若只缩放 e 而不缩放 J，
+      // 等效步长会被放大 sqrt(w_pos)≈7.07 倍，第一步即冲过目标并撞限位（实测发散）。
+      const double sw_pos = std::sqrt(w_pos_);
+      const double sw_rot = std::sqrt(w_rot_);
+      for (int r = 0; r < 3; ++r) J.row(r) *= sw_pos;
+      for (int r = 3; r < 6; ++r) J.row(r) *= sw_rot;
       Eigen::MatrixXd A = J.transpose() * J + lambda_ * Eigen::MatrixXd::Identity(n, n);
       Eigen::VectorXd dq = A.ldlt().solve(J.transpose() * e);
       if (!dq.allFinite()) break;
+
+      // 单步限幅：防止大姿态误差下一步跨度过大导致绕限位震荡
+      const double step = dq.norm();
+      const double kMaxStep = 0.3;  // rad/次迭代
+      if (step > kMaxStep) dq *= kMaxStep / step;
 
       q += dq;
       kin_.clamp(q, left);
