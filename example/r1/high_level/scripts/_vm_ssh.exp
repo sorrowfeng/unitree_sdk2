@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+# 内部用：通过密码登录 VM 执行一条远程命令。
+# 用法: _vm_ssh.exp <pass> <port> <user> <host> <command>
+set timeout 3600
+set pass [lindex $argv 0]
+set port [lindex $argv 1]
+set user [lindex $argv 2]
+set host [lindex $argv 3]
+set cmd  [lindex $argv 4]
+spawn ssh -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $user@$host $cmd
+expect {
+  -re "(P|p)assword:" { send "$pass\r"; exp_continue }
+  -re "yes/no"      { send "yes\r"; exp_continue }
+  eof
+}
+catch wait result
+exit [lindex $result 3]

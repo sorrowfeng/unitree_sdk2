@@ -1,0 +1,6 @@
+[submodule "hand_control_ws"]
+	path = submodules/hand_control_ws
+	url = https://github.com/sorrowfeng/hand_control_ws.git
+[submodule "xr_teleoperate"]
+	path = submodules/xr_teleoperate
+	url = https://github.com/unitreerobotics/xr_teleoperate.git

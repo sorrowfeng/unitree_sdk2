@@ -1,0 +1,19 @@
+#!/usr/bin/expect -f
+# 内部用：通过密码把本地路径同步到 VM。
+# 用法: _vm_rsync.exp <pass> <port> <user> <host> <src> <dst> [rsync extra args...]
+set timeout 3600
+set pass  [lindex $argv 0]
+set port  [lindex $argv 1]
+set user  [lindex $argv 2]
+set host  [lindex $argv 3]
+set src   [lindex $argv 4]
+set dst   [lindex $argv 5]
+set extra [lrange $argv 6 end]
+spawn rsync -az --exclude=.git {*}$extra -e "ssh -p $port -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" $src $user@$host:$dst
+expect {
+  -re "(P|p)assword:" { send "$pass\r"; exp_continue }
+  -re "yes/no"      { send "yes\r"; exp_continue }
+  eof
+}
+catch wait result
+exit [lindex $result 3]

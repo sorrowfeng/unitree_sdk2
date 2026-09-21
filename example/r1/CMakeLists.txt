@@ -20,3 +20,9 @@ target_link_libraries(r1_arm_sdk_dds_example unitree_sdk2 fmt)
 
 add_executable(r1_arm_action_example high_level/r1_arm_action_example.cpp)
 target_link_libraries(r1_arm_action_example unitree_sdk2)
+
+add_executable(r1_dual_arm_loco_skeleton high_level/r1_dual_arm_loco.cpp)
+target_link_libraries(r1_dual_arm_loco_skeleton unitree_sdk2)
+
+add_executable(r1_tool high_level/r1_tool.cpp)
+target_link_libraries(r1_tool unitree_sdk2)
