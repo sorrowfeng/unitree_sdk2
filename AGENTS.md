@@ -69,9 +69,13 @@ RobotProject/
    ```bash
    VM_PASS=<密码> unitree_sdk2/example/r1/high_level/scripts/deploy.sh          # 增量同步 + build + tests
    VM_PASS=<密码> .../scripts/deploy.sh --no-test                              # 只编译
-   VM_PASS=<密码> .../scripts/deploy.sh --full                                 # 首次/改了其它 SDK 文件
+   VM_PASS=<密码> .../scripts/deploy.sh --example                              # 同步整个 example/
+   VM_PASS=<密码> .../scripts/deploy.sh --full                                 # 首次/改了 SDK 核心
    ```
-   增量只同步 `example/r1/high_level/` 与 `example/r1/CMakeLists.txt`；改其它 SDK 文件用 `--full`。
+   增量同步 **`example/r1/` 整个目录** —— 范围必须 ≥ `example/r1/CMakeLists.txt` 的可见范围
+   （其 target 引用 `high_level/`、`low_level/`、`audio/` 三处；只同步其中一部分会在 cmake
+   配置阶段报「找不到源文件」）。改别的示例目录（如 `example/g1/`）用 `--example`；
+   改 `include/`、`lib/`、`thirdparty/` 等 SDK 核心用 `--full`。rsync 不带 `--delete`。
 3. 编译特定 target：`deploy.sh` 默认只编 `r1_dual_arm_loco_skeleton`；编 `r1_tool` 需在远端手动
    `example/r1/high_level/scripts/build.sh r1_tool`（或 SSH 执行）。
 

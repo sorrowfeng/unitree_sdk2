@@ -54,8 +54,11 @@ make -j$(nproc) r1_dual_arm_loco_skeleton
 # 首次：全量同步整个 SDK（排除 .git / build）
 VM_PASS=<VM密码> example/r1/high_level/scripts/deploy.sh --full
 
-# 日常：增量同步 example/r1/high_level + r1/CMakeLists.txt，远程 build + run_tests
+# 日常：增量同步 example/r1 整个目录，远程 build + run_tests
 VM_PASS=<VM密码> example/r1/high_level/scripts/deploy.sh
+
+# 上游改动了其它示例目录（如 example/g1/）
+VM_PASS=<VM密码> example/r1/high_level/scripts/deploy.sh --example
 
 # 只编译不测试
 VM_PASS=<VM密码> example/r1/high_level/scripts/deploy.sh --no-test
@@ -64,8 +67,11 @@ VM_PASS=<VM密码> example/r1/high_level/scripts/deploy.sh --no-test
 可用环境变量覆盖目标机：`VM_HOST`（默认 `10.211.55.6`）、`VM_USER`（`plf-virtual`）、
 `VM_PORT`（`22`）、`VM_DIR`（`~/RobotProject/unitree_sdk2`）。
 
-> 增量同步只覆盖 `example/r1/high_level/` 与 `example/r1/CMakeLists.txt`；若改了 SDK
-> 其它文件，请用 `--full`。密码仅从 `VM_PASS` 读取，不写入脚本。
+> **同步范围必须 ≥ CMakeLists 的可见范围。** 增量同步覆盖 `example/r1/` 整个目录：
+> 该目录的 `CMakeLists.txt` 里 target 引用了 `high_level/`、`low_level/`、`audio/` 三处源文件，
+> 只同步其中一部分会让 cmake 在配置阶段报「找不到源文件」。改 SDK 核心（`include/`、
+> `lib/`、`thirdparty/`）用 `--full`。密码仅从 `VM_PASS` 读取，不写入脚本。
+> 注意 rsync 不带 `--delete`，VM 上被上游改名后的旧文件会残留（不被 CMakeLists 引用，无害）。
 
 ## 测试（不接机器人）
 
