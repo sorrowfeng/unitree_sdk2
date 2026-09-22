@@ -226,7 +226,15 @@ $PY example/r1/high_level/scripts/pico_sim_sender.py \
 | `view_traj.py` | L2 可视化（**不接 PICO**）：MuJoCo 回放 + 目标/实际末端标记 + 可选导出 mp4 |
 | `view_pico.py` | L2 可视化（**接 PICO**）：监听 UDP，实时把 PICO 报文驱动的双臂动作显示出来 |
 | `gui_boot.py` | macOS 开窗适配：自动把普通 python 切到 `mjpython`，并修 libpython 搜索路径 |
-| `diag_ik_rootcause.py` | 发散问题的根因对照实验 |
+| `diag_ik_rootcause.py` | 发散问题的根因对照实验（**注意：其「as-written」模型是修复前的旧公式**，仅作历史留档） |
+| `check_official_parity.py` | 机检关节链参数（origin/rpy/axis/限位/EE 偏移）vs 官方 URDF，逐项零偏差判据 |
+| `check_ik_vs_official.py` | 同批目标点：官方目标函数（pinocchio + SLSQP）vs 我方 DLS，比**解**与**目标函数值 J** |
+| `check_ik_stress.py` | 随机远目标 + warm-start 偏离扫描（回答"实机手速下会不会分叉"） |
+| `check_pico_e2e.py` | PICO 端到端残差：合成报文 → 全链路 → 解出关节角 → MuJoCo 独立 FK 比对 |
+| `bridge_ik.cpp` | 行协议桥（`FK`/`IKL`/`IKL2`/`IKEOBJ`），把 C++ 求解器暴露给 Python 驱动 |
+| `dump_chain.cpp` | 导出关节链参数供与官方 URDF 机检 |
+| `probe_ik_solver.cpp` | 求解器受控实验（位置追踪 / 初值扫描 / 姿态扫描 / 权重消融） |
+| `probe_reach.py` | 反算目标 → 真实管线 → MuJoCo 独立 FK 校验，带顶限位标记 |
 | `json_shim.cpp` | 本机补 `unitree::common::FromJsonString`（官方实现在 Linux 库里） |
 | `pico_pipeline_test.cpp` | PICO 报文全链路：解析 → 安全判据 → 对齐 → IK |
 | `safety_scenarios.py` | 安全场景一键回归（7 个场景，断言判据优先级） |
@@ -249,30 +257,85 @@ ik-raw : 同上                                    → q[2n]（solveArm，无平
       （A5 +0.20m x / A7 +0.05m x）；四元数顺序 x y z w。
 ```
 
-## 当前基线（2026-09-21，`r1_arm_ik.h` 修复后）
+## 当前基线（2026-09-22，`r1_arm_ik.h` 补齐官方**四项目标**后）
 
 | 指标 | A5 | A7 |
 |---|---|---|
-| FK 交叉校验（C++ vs MuJoCo） | 位置差 p95 6.3e-10 mm | 6.4e-10 mm |
-| IK 冷启动 home→典型位姿（±0.5 rad） | mean 0.13 mm | 0.39 mm |
-| IK 任务空间（±0.6 rad，n=300） | mean 0.09 / p95 0.40 mm，100% ≤5mm | 0.33 / 1.07 mm，98.5% |
-| 轨迹跟踪 800 帧（warm start，无平滑） | mean 0.03 mm | 0.03 mm |
-| 轨迹跟踪（含 WMA 平滑） | mean 4.33 mm | 3.45 mm |
-| IK 全域采样（全关节范围，n=300） | mean 29.6 mm，71.8% ≤5mm | 34.8 mm，66.2% |
+| FK 交叉校验（C++ vs MuJoCo） | 位置差 p95 6.5e-10 mm | 6.4e-10 mm |
+| FK 交叉校验（C++ vs 官方 pinocchio） | 位置 6e-11 m / 姿态 9e-4° | 同 |
+| **官方目标函数逐点对照**（`check_ik_vs_official.py`） | 我方 52.5 vs 官方 52.4 mm，逐点差 max **2.79 mm** | 109.9 vs 110.7 mm，max **4.42 mm** |
+| **同输入目标函数值 J**（逐样本差） | mean 0.0018 / max 0.050 | mean ~0.000 |
+| 随机目标压力（warm start σ=0.1 rad，`check_ik_stress.py`） | 4.11 vs 官方 4.09 mm，逐点差 p95 0.49 mm | 4.77 vs 4.73 mm，p95 0.34 mm |
+| 轨迹跟踪 800 帧（warm start，无平滑） | mean 4.00 mm | mean 5.10 mm |
+| 轨迹跟踪 800 帧（含 WMA 平滑） | mean 5.81 mm | mean 6.64 mm |
+| 任务空间（±0.6 rad，n=300） | mean 6.46 mm，42.3% ≤5mm | 9.23 mm，23.8% |
+| IK 全域采样（全关节范围，n=300） | mean 22.8 mm，2.7% ≤5mm | 28.8 mm，0.7% |
 
-> 全域采样下的大误差来自两方面：① 5 DOF 手臂跟踪 6D 全姿态的固有折衷；
-> ② 目标本身可能不满足关节限位。真实遥操工作空间在任务空间采样一档。
+> ⚠️ **别误读这两档**：上面「任务空间 / 全域采样」两档的绝对位置精度，
+> **官方目标函数自己也达不到更高**。同工况实测（官方 URDF + 官方权重 + SLSQP 30 iter）：
+> 任务空间档官方 mean **5.75 mm** / 46% ≤5mm，我方 6.97 mm / 41.3%，J 中位 0.0515 vs 0.0521。
+> 原因是 `0.1·||q−q_last||²` 在"warm start 离目标远"时**固有地**换来位置精度：
+> warm start 偏 0.6 rad 时，该平滑项等效于 ~27 mm 的位置代价（√(0.1·0.6²/50)）。
+>
+> 也就是说这两档测的是**目标函数的折衷**，不是求解器精度。
+> 实机连续遥操时 warm start ≈ 当前关节角 ≈ 目标附近（σ < 0.1 rad），
+> 逐点位置差 p95 **0.49 mm** —— 这才是该看的数。
+>
+> 📌 历史注记：补齐前（缺 reg/smooth 两项）这两档数字更"漂亮"（任务空间 0.09 mm / 100%），
+> 但那是因为**没在解官方问题** —— 它牺牲姿态硬贴位置，同目标下 J 反而更高（见下节「与官方的一致性验证」）。
 
-### PICO 报文端到端（A5，3s @30Hz，sway 幅度 0.2 rad）
+### 与官方的一致性验证（两套独立方法，`sim/check_ik_vs_official.py` / `sim/check_ik_stress.py`）
 
-| 口径 | EE 位置 mean / max | EE 姿态 mean / max |
-|---|---|---|
-| `--raw`（跳过 WMA 平滑） | **0.108 mm / 0.358 mm** | 0.013° / 0.037° |
-| `ik.solve`（含 WMA，= 实机口径） | **7.69 mm / 16.74 mm** | 1.53° / 2.80° |
+```bash
+$PY sim/check_official_parity.py a5      # 关节链参数 vs 官方 URDF（24 项零偏差）
+$PY sim/check_ik_vs_official.py a5       # 同批目标：官方目标函数(SLSQP) vs 我方 DLS
+$PY sim/check_ik_stress.py a5            # 随机目标 + warm-start 偏离扫描
+```
 
-> 两者差值即 **WMA 平滑的滞后**：`weights=[0.4,0.3,0.2,0.1]` 相当于约 1 帧群延迟，
-> 跟随误差 ≈ 手速 × 滞后时间。这一行为与官方 `WeightedMovingFilter` 一致，不是缺陷；
-> 若要更跟手，可改 `r1_arm_ik.h::smooth()` 的权重（代价是抖动变大）。
+| 项 | 结论 |
+|---|---|
+| 关节链 origin/rpy/axis/限位 | **24/24 项零偏差**（A5 10 项 / A7 14 项） |
+| 目标权重 | 50 / 0.5(A5)·1.0(A7) / 0.02 / 0.1 —— 与官方 `opti.minimize` 逐项同 |
+| `q_last` 语义 | = warm start = 上层传入的当前关节角（官方 `current_lr_arm_motor_q`） |
+| FK | 与官方 pinocchio 差 6e-11 m |
+| EE 手安装偏移 | A5 wrist_roll+0.20 / A7 wrist_yaw+0.05 |
+| 迭代预算 | 30（= 官方 `ipopt.max_iter`） |
+
+**warm-start 偏离扫描**（σ = 每关节随机偏移；力臂 0.5 m 折算）——我方与官方的位置差 p95：
+
+| σ (rad) | ≈腕部偏移 | A5 | A7 |
+|---|---|---|---|
+| 0.02 | 10 mm | 0.47 mm | 0.49 mm |
+| 0.10 | 50 mm | 0.49 mm | 0.34 mm |
+| 0.30 | 150 mm | 0.54 mm | 0.45 mm |
+| 0.60 | 300 mm | 0.67 mm | 0.65 mm |
+| 1.20 | 600 mm | 302 mm ⚠️ | 175 mm ⚠️ |
+
+即 warm start 偏到 300 mm（单帧不可能的量级）仍与官方一致；只有到 600 mm 才分叉。
+
+
+### PICO 报文端到端（3s @30Hz，wave 幅度 0.2 rad）
+
+一键复现（`check_pico_e2e.py` 固化 README 里原先只写了描述的第 3 步）：
+
+```bash
+$PY sim/check_pico_e2e.py --variant a5           # wave（关节空间正弦）
+$PY sim/check_pico_e2e.py --variant a5 --pose-mode circle
+```
+
+| 口径 | A5 位置 mean / max | A5 姿态 mean / max | A7 位置 mean / max |
+|---|---|---|---|
+| `--raw`（跳过 WMA 平滑） | **0.57 mm / 1.48 mm** | 0.58° / 2.36° | 0.64 mm / 2.35 mm |
+| `ik.solve`（含 WMA，= 实机口径） | **10.29 mm / 17.27 mm** | 2.09° / 3.23° | 7.37 mm / 10.04 mm |
+
+> `--raw` 档 0.57 mm（旧版为 0.108 mm）就是**官方目标函数的最优解残差**：位置与姿态按
+> 100:1 加权后位置不再精确命中，官方同样如此（见上表 J 对照）。这是"按官方走"的代价。
+> 两档之差 ≈ **WMA 平滑的滞后**（`weights=[0.4,0.3,0.2,0.1]` 约 1 帧群延迟，
+> 跟随误差 ≈ 手速 × 滞后时间）。与官方 `WeightedMovingFilter` 一致，不是缺陷。
+>
+> `--pose-mode circle`（任务空间圆周、姿态固定）在 A5 上 raw 残差 ~38 mm —— **旧版同为
+> 38.6 mm**，属 5-DOF 臂跟踪固定姿态的固有折衷，与本次改动无关。
+
 
 ### 安全判据场景验证
 

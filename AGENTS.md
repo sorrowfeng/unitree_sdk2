@@ -130,7 +130,8 @@ LocoClient ──▶ 机载运控 ai_sport（站立/行走/阻尼/零力矩）
 - 头/腰遥操跟随未实现（仅启动回零）。
 - 灵巧手仅 `NullHandDriver`，不驱动实际手。
 - `r1_xr_pose_alignment.h` 腰部偏移 `+0.15x/+0.45z` 为常量，上机需标定。
-- C++ IK 用 DLS 逼近官方 CasADi+IPOPT，非逐位一致。
+- C++ IK 用 DLS 最小化官方的**完整四项**目标（pos/rot/正则/平滑），已与官方
+  IPOPT 逐点对照（`sim/check_ik_vs_official.py`，A5 最大偏差 2.79 mm）；仍非逐位一致。
 
 **设计选择（不是缺陷）：** 掉包（>600 ms）或急停触发阻尼后**不自动重新站立**，
 需操作者显式 `s`（PICO 站立键）。与官方 `xr_teleoperate` 一致，避免链路抖动后自行起身。

@@ -191,4 +191,6 @@ R1-EDU 的“开发计算单元”（算力背包，Jetson Orin，`192.168.123.1
 - **灵巧手**：`NullHandDriver` 只打印 6 路原始值（0..10000），实际驱动需继承 `HandDriver`。
 - **A7**：官方固件未开放 `rt/arm_sdk` 覆盖模式，必须用 `--lowcmd`，且使用前需释放机载运控服务。
 - **标定**：`r1_xr_pose_alignment.h` 中腰部偏移 `+0.15 x / +0.45 z` 为常量，上机后需按实际几何标定。
-- **IK**：用 DLS 逼近官方 CasADi+IPOPT 目标，行为一致但非逐位相同；追求最高保真可用 Python 侧求解器。
+- **IK**：用 DLS 最小化官方**完整四项**目标（`50·pos² + c_rot·rot² + 0.02·||q||² + 0.1·||q−q_last||²`），
+  已与官方 IPOPT 同输入逐点对照（`sim/check_ik_vs_official.py`，A5/A7 逐点最大偏差
+  2.79 / 4.42 mm，肘角轨迹重合），行为一致但非逐位相同；追求最高保真可用 Python 侧求解器。

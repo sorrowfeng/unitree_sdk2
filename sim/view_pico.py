@@ -152,6 +152,14 @@ class PipelineClient:
 
 
 def main() -> None:
+    # 后台启动时 stdout 不是 tty，默认块缓冲（4KB）会把启动日志全部压住，
+    # 直到进程退出才吐出来 —— 看上去就像"卡在切换解释器那一步"。
+    # 这里强制行缓冲，让日志随打随到（同 pico_pipeline_test.cpp 补 std::flush 的原因）。
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     ap = argparse.ArgumentParser(description="接 PICO 的实时可视化（UDP -> 全链路 -> MuJoCo）")
     ap.add_argument("--variant", default="a5", choices=["a5", "a7"])
     ap.add_argument("--port", type=int, default=9999, help="监听 UDP 端口（对应 --pico-port）")
@@ -161,6 +169,8 @@ def main() -> None:
     ap.add_argument("--stale", type=float, default=1.0, help="超过该秒数无报文即视为失联")
     ap.add_argument("--font", default="normal", choices=["normal", "big"],
                     help="HUD 字号：normal 为原始字号（默认），big 是 2 倍大字")
+    ap.add_argument("--log", default=None, metavar="CSV",
+                    help="把每帧的跟踪数据写成 CSV（诊断跟随误差用）；- 表示 stdout")
     args = ap.parse_args()
 
     ensure_gui_interpreter()
@@ -199,6 +209,17 @@ def main() -> None:
     last_rx = 0.0
     n_pkt = 0
 
+    # 诊断用逐帧日志：窗口里看到的红绿球差多少，这里就记多少，便于事后定量分析
+    # （是工作空间外顶限位、还是平滑滞后、还是求解器没收敛）。
+    log_f = None
+    if args.log:
+        log_f = sys.stdout if args.log == "-" else open(args.log, "w", buffering=1)
+        log_f.write("t,seq,disp,pkts,"
+                    "tgt_lx,tgt_ly,tgt_lz,tgt_rx,tgt_ry,tgt_rz,"
+                    "act_lx,act_ly,act_lz,act_rx,act_ry,act_rz,"
+                    "err_l_mm,err_r_mm\n")
+        print(f"[pico-view] 逐帧日志 -> {args.log}", flush=True)
+
     try:
         with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
             while viewer.is_running():
@@ -223,8 +244,18 @@ def main() -> None:
 
                 sim.set_q(q)
                 pl, _, pr, _ = sim.ee_dual()
+                err_l = err_r = float("nan")
                 if target is not None:
-                    err = float(np.linalg.norm(np.asarray(pl) - target[0])) * 1000.0
+                    err_l = float(np.linalg.norm(np.asarray(pl) - target[0])) * 1000.0
+                    err_r = float(np.linalg.norm(np.asarray(pr) - target[1])) * 1000.0
+                    err = err_l
+                    if log_f is not None:
+                        log_f.write(
+                            f"{time.time():.6f},{seq},{disp},{n_pkt},"
+                            + ",".join(f"{v:.6f}" for v in (*target[0], *target[1]))
+                            + "," + ",".join(f"{v:.6f}" for v in (*pl, *pr))
+                            + f",{err_l:.4f},{err_r:.4f}\n"
+                        )
 
                 viewer.user_scn.ngeom = 0
                 if target is not None:
@@ -258,6 +289,8 @@ def main() -> None:
     finally:
         client.close()
         sock.close()
+        if log_f is not None and log_f is not sys.stdout:
+            log_f.close()
         print(f"[pico-view] 退出，共处理 {n_pkt} 包")
 
 

@@ -67,10 +67,25 @@ where c_rot = 0.5 (A5) / 1.0 (A7)
 失败：回退返回当前关节角、零力矩
 ```
 
-`r1_arm_ik.h` 用**阻尼最小二乘（DLS）**逼近同一目标：
-错误向量 = [√50·Δp；√c_rot·rotvec(R_ee·R_t^T)]，Δq = (J^T·J + λ·I)^-1 · J^T·e，
-数值雅可比（6×n）来自 URDF 原点/轴线参数，关节限位每步硬 clamp。
-位置权重远大于姿态 → 行为与官方一致：优先末端够得到，姿态为软目标。
+`r1_arm_ik.h` 用**阻尼最小二乘（DLS）**最小化**同一四项**目标：
+
+```
+r  = [ √50·(p_t-p) ; -√c_rot·rotvec(R_ee·R_t^T) ; √0.02·q ; √0.1·(q - q_last) ]
+Jw = [ √50·J_p ; √c_rot·J_w ; -√0.02·I ; -√0.1·I ]
+Δq = (Jw^T·Jw + λ·I)^-1 · Jw^T·r      每步对 q 做 URDF 限位 clamp
+```
+
+`q_last` 取**本帧的 warm start**（= 上层传入的当前关节角 `arm.currentArmQ()`），
+这与官方一致 —— 官方 `solve_ik()` 把 `var_q_last` 和 warm start 设成同一个量
+`current_lr_arm_motor_q`（`robot_arm.py` 主循环传入的实测关节角）。
+
+数值雅可比（6×n）来自 URDF 原点/轴线参数；迭代预算 30 次对齐官方 `ipopt.max_iter`。
+
+> ⚠️ 后两项（`0.02·||q||²` 正则、`0.1·||q-q_last||²` 平滑）**曾经缺失**，
+> 在 A5 这种 5-DOF 超定臂上后果严重：姿态残差大时 DLS 会把解推向关节限位
+> （肘顶死 −55.9°、位置误差 649 mm）。补齐后 52.5 mm，与官方 IPOPT 的 52.4 mm 一致。
+> 消融：平滑项决定性（只加它 → 50.8 mm），正则项次之（只加它 → 105 mm）。
+> 对照脚本 `sim/check_ik_vs_official.py` 可回归验证。
 
 > 追求最高保真度：直接跑 xr_teleoperate 的 Python IK（Pinocchio+CasADi），
 > 或把 C++ 侧换成 Pinocchio/CasADi 同名实现。
