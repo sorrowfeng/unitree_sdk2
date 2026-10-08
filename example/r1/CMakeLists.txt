@@ -26,3 +26,6 @@ target_link_libraries(r1_dual_arm_loco_skeleton unitree_sdk2)
 
 add_executable(r1_tool high_level/r1_tool.cpp)
 target_link_libraries(r1_tool unitree_sdk2)
+
+add_executable(r1_arm_manual high_level/r1_arm_manual.cpp)
+target_link_libraries(r1_arm_manual unitree_sdk2)

@@ -48,6 +48,21 @@ c++ -std=c++17 -O2 \
   "$DIR/json_shim.cpp" "$DIR/pico_pipeline_test.cpp" \
   -o "$DIR/build/pico_pipeline_test"
 
+# 解析/安全判据单测（tests/test_pico_parse.cpp）：与上面同一套 shim，
+# 覆盖 operator_mode 兜底、急停闩锁、decideDisposition 优先级等。
+# ⚠️ 之前 build_probe.sh 漏了它，导致该单测只在上机时（run_tests.sh）才会被编到 ——
+#    本机改完 r1_pico_udp.h / r1_pico_safety_policy.h 无法立即回归。补上。
+echo "[build_probe] 编译 test_pico_parse ..."
+c++ -std=c++17 -O2 \
+  -I "$DIR/shim" \
+  -I "$DIR/thirdparty" \
+  -I "$SDK/include" \
+  -I "$SDK/thirdparty/include" \
+  -I "$SDK/example/r1/high_level" \
+  "$DIR/json_shim.cpp" "$SDK/example/r1/high_level/tests/test_pico_parse.cpp" \
+  -o "$DIR/build/test_pico_parse"
+
 echo "[build_probe] 完成:"
 echo "  $DIR/build/ik_probe            (IK 探针)"
 echo "  $DIR/build/pico_pipeline_test  (PICO 报文全链路)"
+echo "  $DIR/build/test_pico_parse     (解析/安全判据单测)"

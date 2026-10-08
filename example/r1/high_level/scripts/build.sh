@@ -8,8 +8,10 @@
 #   BUILD_TYPE=Debug scripts/build.sh
 #
 # 依赖 (Ubuntu 20.04/22.04，x86_64 或 aarch64 均可):
-#   sudo apt install -y cmake g++ build-essential \
-#     libyaml-cpp-dev libeigen3-dev libboost-all-dev libfmt-dev
+#   cmake, g++, make, libyaml-cpp-dev, libeigen3-dev, libboost-all-dev, libfmt-dev
+#   ⚠️ **背包上这些全已就绪，不要跑 apt**（该机 apt 解析器被版本错位卡死、且无外网），
+#      装包只能「本机下 .deb → scp → sudo dpkg -i」，详见
+#      example/r1/high_level/R1_BACKPACK_ARCHITECTURE.md §4.7.10。脚本只做自检，不会调用 apt。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +37,8 @@ for h in /usr/include/eigen3/Eigen/Dense /usr/include/yaml-cpp/yaml.h /usr/inclu
 done
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "[build] 缺少依赖: ${missing[*]}" >&2
-  echo "        sudo apt install -y cmake g++ build-essential libyaml-cpp-dev libeigen3-dev libboost-all-dev libfmt-dev" >&2
+  echo "        ⚠️ 背包上这些依赖已齐备 —— 先确认是否真的缺，不要直接跑 apt（该机 apt 不可用）。" >&2
+  echo "        装包走「本机下 .deb → scp → sudo dpkg -i」，见 R1_BACKPACK_ARCHITECTURE.md §4.7.10" >&2
   exit 1
 fi
 

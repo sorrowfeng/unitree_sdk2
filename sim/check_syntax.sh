@@ -32,7 +32,7 @@ ln -sfn "$EIGEN_SRC" "$INC_GEN/eigen3"
 
 TARGETS=("$@")
 if [ ${#TARGETS[@]} -eq 0 ]; then
-  TARGETS=(r1_dual_arm_loco.cpp r1_tool.cpp)
+  TARGETS=(r1_dual_arm_loco.cpp r1_arm_manual.cpp r1_tool.cpp)
 fi
 
 COMMON=(
