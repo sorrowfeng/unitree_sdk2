@@ -33,13 +33,18 @@ rt/arm_sdk（LowCmd_，mode_pr = 权重 0..100，100=完全接管双臂）
 机载 ai_sport：下肢平衡/行走照常；双臂按你给的 PD 目标执行
 ```
 
+> **想先单独验证「这条通道」通不通**（腿保持运控 + 手臂按指令动），用官方示例
+> **`r1_arm_sdk_dds_example`**（`build.sh r1_arm_sdk_dds_example`）——它发的就是同一个 `rt/arm_sdk`。
+> ⚠️ **不要**用 `low_level/` 那三个 wrist/ankle swing 示例：它们第一步 `ReleaseMode()` 会把运控整个关掉。
+> 完整的选型对照与上机顺序见 `R1_BACKPACK_ARCHITECTURE.md` **§4.8**。
+
 ## 2. 关键参数（与 xr_teleoperate 当前 head 一致）
 
 | 项 | 值 | 出处 |
 |---|---|---|
 | 发布频率 | 250 Hz（control_dt = 1/250） | R1_A5_ArmController |
 | arm_sdk 权重 | mode_pr = int(weight*100)，release 时 2 s 线性降到 0 | _set_arm_sdk_weight |
-| 关节速度限幅 | 30 rad/s（arm_vel_limit，可改） | set_arm_velocity_limit |
+| 关节速度限幅 | 30 rad/s（arm_vel_limit，可改）。⚠️ 限幅作用在**指令轨迹**上（指令按 allowed 积分），**不是**"实测 + 每帧一小步"——后者在低限速下会因偏差力矩低于静摩擦而死锁（2026-09-23 真机踩到，见 `R1_BACKPACK_ARCHITECTURE.md` §4.9.9） | set_arm_velocity_limit |
 | 上电头/腰回零 | 3 s 线性到 0（头 29/30，腰 12/13） | ctrl_head_and_waist_go_home |
 | 双臂回零 | target=0 直到 |q|<0.05（最多 5 s） | ctrl_dual_arm_go_home |
 | 肩 pitch/roll | kp=50, kd=2 | kp_low/kd_low |
@@ -165,7 +170,7 @@ televuer 的 safe_mat_update 只做矩阵有效性保护，无效帧沿用上一
 | 位姿输入 | 原始 4x4 矩阵直接进 solve_ik | PicoPose3.toOpenXrPose()：四元数转 4x4（等效官方矩阵输入） |
 | IK 输出 | WeightedMovingFilter([0.4,0.3,0.2,0.1])，窗口 4 帧，未满直通最新值，重复帧跳过 | R1DualArmIk::smooth() 逐条移植（teleop/utils/weighted_moving_filter.py 语义） |
 | 主循环频率 | --frequency 默认 30 Hz | PICO 链路目标循环固定 30 Hz |
-| 发布端 | 250 Hz + clip_arm_q_target 关节速度限幅 30 rad/s | R1ArmController::publishLoop 250 Hz + clipTargets 30 rad/s |
+| 发布端 | 250 Hz + 关节速度限幅 30 rad/s | R1ArmController::publishLoop 250 Hz + `clipTargets` 30 rad/s（2026-09-23 起改为**指令积分** + `arm_cmd_lag_max` 兜底，理由见 §4.9.9） |
 | IK warm start | 每帧用当前 lowstate 关节角 | ik.solve(..., arm.currentArmQ()) |
 
 > 结论：四元数只在重建 4x4 输入矩阵这一步被使用（官方拿到的本来就是完整矩阵，等效）；

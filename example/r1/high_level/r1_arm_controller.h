@@ -71,6 +71,11 @@ class R1ArmController {
                                    // false: 发布到 rt/lowcmd（全关节，需释放机载运动服务）
     double publish_hz = 250.0;     // 官方 250 Hz
     double arm_vel_limit = 30.0;   // rad/s，官方 set_arm_velocity_limit 默认值
+    // 指令允许领先实测的最大量（rad，≈20°）。仅作兜底：指令按 arm_vel_limit 积分，
+    // 若电机被物理卡住，指令会一直往前跑；无此上限则卡滞解除瞬间会暴冲。
+    // ⚠️ 与 arm_vel_limit 一起看：领先量 = vel_limit/publish_hz，太小（如 vel=2 ⇒ 0.46°）
+    //    会因力矩低于静摩擦而死锁 —— 详见 clipTargets() 的注释。
+    double arm_cmd_lag_max = 0.35;
     // 增益（与 xr_teleoperate 当前 head 提交一致）
     double kp_shoulder = 50.0, kd_shoulder = 2.0;   // 肩 pitch/roll
     double kp_elbow    = 40.0, kd_elbow    = 2.0;   // 肩 yaw / 肘
@@ -129,6 +134,7 @@ class R1ArmController {
       q_target_ = currentArmQ();
       tau_ff_ = Eigen::VectorXd::Zero(armDof());
     }
+    cmd_reset_.store(true);  // 指令轨迹从实测重新起步（配合 clipTargets）
 
     // 7) 启动 250Hz 发布线程
     run_.store(true);
@@ -385,16 +391,39 @@ class R1ArmController {
     }
   }
 
-  /// 关节速度限幅（对齐 xr_teleoperate clip_arm_q_target）。
-  Eigen::VectorXd clipTargets(const Eigen::VectorXd& q) const {
+  /// 关节速度限幅：**指令轨迹积分**（不是"实测 + 每帧一小步"）。
+  ///
+  /// ⚠️ 2026-09-23 真机缺陷修复（与 r1_arm_manual.cpp 同源，那里先暴露）：
+  ///   原实现是 `cur + delta/scale`，即每帧最多比【实测】超前 arm_vel_limit*dt。
+  ///   当这个领先量产生的力矩小于关节静摩擦/伺服死区时：实测不动 ⇒ 下一帧又从"没动的
+  ///   实测"重新计算 ⇒ 指令永远推不动电机，表现为"权重 100、目标在变、手臂纹丝不动"。
+  ///   实测分界：--vel 2 ⇒ 领先 0.46°(≈0.4 N·m) 必被吃掉；--vel 30 ⇒ 6.9°(≈6 N·m) 能动。
+  ///   本文件因为 arm_vel_limit 默认 30 所以侥幸能用，但把限速调小（或关节阻力变大、
+  ///   或换到需要更大起动转矩的姿态）就会复现同样症状。
+  ///   改为按【指令自身】积分后，领先量会持续累积直到克服死区；arm_cmd_lag_max 兜底，
+  ///   防止电机被物理卡住时指令跑到远处、卡滞解除瞬间暴冲。
+  Eigen::VectorXd clipTargets(const Eigen::VectorXd& q) {
     if (q.size() != armDof()) return q;
     const Eigen::VectorXd cur = currentArmQ();
-    const Eigen::VectorXd delta = q - cur;
-    const double maxd = delta.cwiseAbs().maxCoeff();
+    // 目标被重置到实测（初始化/重新对齐）时，轨迹也从实测重新起步，避免带着旧超前量冲过去
+    if (cmd_reset_.exchange(false) || cmd_prev_.size() != q.size()) {
+      cmd_prev_ = cur;
+    }
+
     const double dt = 1.0 / params_.publish_hz;
-    const double scale = maxd / (params_.arm_vel_limit * dt);
-    if (scale <= 1.0) return q;
-    return cur + delta / scale;
+    const double allowed = params_.arm_vel_limit * dt;
+    Eigen::VectorXd next(q.size());
+    for (int i = 0; i < q.size(); ++i) {
+      const double step = std::clamp(q[i] - cmd_prev_[i], -allowed, allowed);
+      double c = cmd_prev_[i] + step;
+      const double lag = c - cur[i];
+      if (std::abs(lag) > params_.arm_cmd_lag_max) {
+        c = cur[i] + std::copysign(params_.arm_cmd_lag_max, lag);
+      }
+      next[i] = c;
+      cmd_prev_[i] = c;
+    }
+    return next;
   }
 
   void setWeightAndPublish(double w) {
@@ -420,6 +449,10 @@ class R1ArmController {
   mutable std::mutex target_mutex_;
   Eigen::VectorXd q_target_;
   Eigen::VectorXd tau_ff_;
+
+  // 指令轨迹积分器（只有 250 Hz 发布线程访问 cmd_prev_；cmd_reset_ 由初始化线程置位）
+  Eigen::VectorXd cmd_prev_;
+  std::atomic<bool> cmd_reset_{true};
 };
 
 }  // namespace r1skeleton

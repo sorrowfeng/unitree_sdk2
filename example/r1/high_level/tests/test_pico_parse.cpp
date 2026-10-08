@@ -176,6 +176,26 @@ int main() {
   CHECK(pico::parsePicoPacket("{not json", pkt4) == false);
   CHECK(pico::parsePicoPacket("{\"sequence\":0}", pkt4) == false);
 
+  std::cout << "\n=== 9) operator_mode 缺失：fail-safe 兜底 + 可诊断位 ===\n";
+  // 完整包里该键存在，主程序据此不告警
+  CHECK(pkt.operator_mode_present == true);
+  // 旧 :app（pico-openxr-bridge）从不发该键 —— 必须兜底为 stop_signal 且**可被识别**，
+  // 否则现象是"每包都 Damp()、腿一直软"而日志一切正常，极难排查。
+  std::string js_no_mode = js_active;
+  const std::string om_key = "\"operator_mode\": \"active_stream\",";
+  CHECK(js_no_mode.find(om_key) != std::string::npos);
+  js_no_mode.replace(js_no_mode.find(om_key), om_key.size(), "");
+  pico::PicoTeleopPacket pkt8;
+  CHECK(pico::parsePicoPacket(js_no_mode, pkt8));
+  CHECK(pkt8.operator_mode_present == false);   // 供主程序打一次性告警
+  CHECK(pkt8.operator_mode == "stop_signal");   // fail-safe
+  CHECK(pkt8.safeToExecute() == false);
+  CHECK(pico::decideDisposition(pkt8, 10.0, true) == pico::Disposition::kHold);
+  CHECK(pico::holdTriggersDamp(pkt8, 10.0) == true);  // 兜底成 stop_signal ⇒ 触发阻尼
+  // 注意：其余字段完好，所以"包收得很正常"——这正是必须靠 operator_mode_present 分辨的原因
+  CHECK(pkt8.sequence == 42);
+  CHECK(pkt8.safety.safe_to_execute == true);
+
   std::cout << "\n" << (g_fail == 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED")
             << " (failures=" << g_fail << ")\n";
   return g_fail == 0 ? 0 : 1;

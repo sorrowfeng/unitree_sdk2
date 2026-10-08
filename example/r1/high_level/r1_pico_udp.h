@@ -145,6 +145,11 @@ struct PicoTeleopPacket {
   double timestamp_ms = 0.0;
   double age_ms = 0.0;
   std::string operator_mode;         // active_stream / diagnostic_capture / return_zero / stop_signal
+  // JSON 里到底有没有 operator_mode 这个键。缺失时解析端 fail-safe 兜底成 "stop_signal"，
+  // 但两者现象完全不同：真 stop_signal 是操作者主动停；**缺失**几乎总是装错了 App
+  // （旧 :app 是 pico-openxr-bridge，从不发 operator_mode）⇒ 每个包都 Damp()、腿一直软，
+  // 而日志看起来"包收得很正常"。保留该位以便主程序给出一次性告警。
+  bool operator_mode_present = false;
   std::string sdk;
   bool calibrated = false;
   PicoSafety safety;
@@ -322,7 +327,9 @@ inline bool parsePicoPacket(const std::string& json_text, PicoTeleopPacket& out)
     out.sequence = static_cast<uint64_t>(asNumber(find(m, "sequence")));
     out.timestamp_ms = asNumber(find(m, "timestamp"));
     out.age_ms = asNumber(find(m, "age_ms"));
-    out.operator_mode = asString(find(m, "operator_mode"), "stop_signal");
+    const Any* om = find(m, "operator_mode");
+    out.operator_mode_present = (om != nullptr);
+    out.operator_mode = asString(om, "stop_signal");  // 缺失 → fail-safe 兜底为停止
     out.sdk = asString(find(m, "sdk"));
     out.calibrated = asBool(find(m, "calibrated"));
 

@@ -11,6 +11,9 @@
 //   - PICO 端 App 通过 UDP 发送 JSON（默认端口 9999，可按包内 transport.target_port 调整）。
 //   - 本端只在 safety.safe_to_execute == true（且 operator_mode == active_stream）时执行；
 //     return_zero 期间双臂目标归零；stop_signal / 心跳超时 -> 停止（停止移动 + 阻尼）。
+//   - **前置状态要求：机器人已处于 811 主运控**（官方 xr_teleoperate 只支持 Regular mode，
+//     且它自己从不切 FSM）。首个可执行包默认**不**调 StandUp()，只解锁底盘速度闸门。
+//     若需要旧行为（首包自动 StandUp -> FSM 4），显式加 --auto-stand。
 //   - 双臂目标 = teleop.left/right.pose（校准后 grip pose）-> 欧拉(deg,ZYX) 重建 4x4
 //     -> OpenXR->Robot 对齐（见 r1_xr_pose_alignment.h，默认 head-yaw 参考系）
 //     -> R1ArmIk.solve() -> R1ArmController.setTargets()。
@@ -20,6 +23,12 @@
 // 非 --pico 模式：
 //   运行互动（stdin）：v vx vy vyaw | s | d | t | q
 //   --ik 任务空间演示 / 默认关节空间 movej 演示。
+//
+// 退出：
+//   q / Ctrl+C（SIGINT）/ kill（SIGTERM）/ SSH 掉线或关窗口（SIGHUP）都会走同一条
+//   清理路径：join 线程 -> arm.goHomeAndRelease() -> hand.stop() -> arm.stop()，
+//   期间 loco 线程收尾 StopMove + Damp。**别用 kill -9** —— 那样进程来不及回零与
+//   释放权重，双臂会冻结在最后一帧姿态（且本端不自动复位）。
 //
 // 线程结构：
 //   A: Loco 线程（r1::LocoClient）
@@ -79,6 +88,8 @@ void printUsage(const char* prog) {
     "  --ik                      任务空间演示（默认关节空间 movej；--pico 时忽略）\n"
     "  --move                    自动站立并按 --vx/--vy/--vyaw 持续移动\n"
     "  --pico [port]             PICOHandLink UDP 接入（默认端口 9999）\n"
+    "  --auto-stand              PICO 首个可执行包时自动 StandUp（-> FSM 4）。\n"
+    "                            默认关：官方遥操不切 FSM，要求机器人已在 811 主运控\n"
     "  --pico-frame head_yaw|head_trans|basis   双臂参考系（默认 head_yaw）\n"
     "  --pico-source controllers|teleop   位姿来源（默认 controllers=原始数据，对齐宇树摇操）\n"
     "  --vx --vy --vyaw          初始移动速度\n"
@@ -99,6 +110,7 @@ int main(int argc, char** argv) {
   bool auto_move = false;
   bool motion_mode = true;
   bool pico_mode = false;
+  bool auto_stand_on_first_packet = false;  // 默认关：不切 FSM（见文件头）
   int pico_port = 9999;
   std::string pico_frame = "head_yaw";
   std::string pico_source = "controllers";  // controllers=原始(对齐宇树) / teleop=校准后端点
@@ -114,6 +126,7 @@ int main(int argc, char** argv) {
     else if (a == "--vx" && i + 1 < argc) vx = std::atof(argv[++i]);
     else if (a == "--vy" && i + 1 < argc) vy = std::atof(argv[++i]);
     else if (a == "--vyaw" && i + 1 < argc) vyaw = std::atof(argv[++i]);
+    else if (a == "--auto-stand") auto_stand_on_first_packet = true;
     else if (a == "--pico") {
       pico_mode = true;
       if (i + 1 < argc && isNumber(argv[i + 1])) pico_port = std::atoi(argv[++i]);
@@ -186,26 +199,48 @@ int main(int argc, char** argv) {
   // ---- 运动控制（LocoClient 线程） ----
   std::atomic<bool> damp_cmd{false};
   std::atomic<bool> stand_cmd{false};
-  std::atomic<bool> auto_stand_pico{false};  // PICO 首个安全包后自动站立一次
+  // PICO 首个可执行包：只解锁"底盘速度闸门"，**默认不去切 FSM**。
+  // 官方 xr_teleoperate 从不切 FSM（明确要求事先处于运控态、只支持 Regular mode），
+  // 我们原先的自动 StandUp() 会把 811 拉到 4，正好撞上"FSM 4 认不认 rt/arm_sdk"这个悬案。
+  std::atomic<bool> first_exec_pkt{false};
   std::atomic<double> cmd_vx{vx}, cmd_vy{vy}, cmd_vyaw{vyaw};
 
   std::thread loco_thread([&]() {
     unitree::robot::r1::LocoClient client;
     client.Init();
     client.SetTimeout(10.f);
-    bool standing = false;
+    // loco_ready 语义 = "允许下发速度"，**不代表我们改过 FSM**。
+    // 仅当走 do_stand 分支时才真的切档；first_exec_pkt 分支默认保持当前 FSM。
+    bool loco_ready = false;
     std::cout << "[loco] LocoClient ready." << std::endl;
     while (!g_quit.load()) {
       if (damp_cmd.exchange(false)) {
         client.Damp();
-        standing = false;
+        loco_ready = false;
         std::cout << "[loco] Damp." << std::endl;
-      } else if (stand_cmd.exchange(false) || auto_stand_pico.exchange(false) || (!pico_mode && auto_move)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        continue;
+      }
+      bool do_stand = stand_cmd.exchange(false);   // stdin 's'
+      if (!pico_mode && auto_move) {               // --move：只自动站一次
+        do_stand = true;
+        auto_move = false;
+      }
+      if (do_stand) {
         client.StandUp();
-        standing = true;
-        auto_move = false;  // 只自动站一次，此后按 stdin 控制
+        loco_ready = true;
         std::cout << "[loco] StandUp." << std::endl;
-      } else if (standing) {
+      } else if (first_exec_pkt.exchange(false)) {
+        if (auto_stand_on_first_packet) {
+          client.StandUp();
+          std::cout << "[loco] StandUp. (PICO 首包 + --auto-stand ⇒ FSM 4)" << std::endl;
+        } else {
+          std::cout << "[loco] PICO 首个可执行包：保持当前 FSM，不自动切档。"
+                       "底盘速度已解锁（腿要动仍需 811 主运控）。" << std::endl;
+        }
+        loco_ready = true;
+      }
+      if (loco_ready) {
         if (pico_mode && !safe_to_move.load()) {
           // PICO 安全闸门关闭：停止移动（保持站立）
           client.StopMove();
@@ -274,6 +309,12 @@ int main(int argc, char** argv) {
 
   // ---- 双臂目标生成（arm 线程，跑在 main） ----
   std::signal(SIGINT, onSigInt);
+  std::signal(SIGTERM, onSigInt);
+  // SSH 掉线 / 终端窗口被关时，内核给前台进程组发的是 SIGHUP，默认动作 = 立即终止进程。
+  // 只接 SIGINT 的话，掉线会让进程来不及执行下面的 goHomeAndRelease() + Damp，
+  // 权重停在 100 且不再发布 ⇒ **双臂冻结在最后一帧姿态**（官方明确警告的失效模式）。
+  // 接住它，走与 Ctrl+C 完全相同的清理路径。
+  std::signal(SIGHUP, onSigInt);
   std::cout << "[main] ready." << (pico_mode ? " 等待 PICO HandLink 数据..." : "")
             << " (stdin: 'v vx vy vyaw' / 's' / 'd' / 't' / 'q', Ctrl+C 退出)" << std::endl;
 
@@ -333,9 +374,27 @@ int main(int argc, char** argv) {
     std::cout << "[pico] frame mode: " << pico_frame
               << " | target loop " << kTargetHz << " Hz (官方 teleop 默认 30 Hz)"
               << " | WMA 关节平滑 4 帧 [0.4,0.3,0.2,0.1] + 250Hz 发布速度限幅 30 rad/s" << std::endl;
+    if (!auto_stand_on_first_packet) {
+      std::cout << "[pico] 首包不切 FSM（官方遥操前置：机器人已在 811 主运控）。"
+                   "腿不动就先执行 example/r1/high_level/scripts/loco.sh start；"
+                   "要旧的自动站立行为请加 --auto-stand" << std::endl;
+    }
     bool first_packet = true;
     bool ever_safe = false;
     bool estop_active = false;         // 急停闩锁的边沿检测（进/出各日志一次）
+    // 掉包/stop_signal 阻尼的边沿检测（与 estop_active 同源问题）。
+    // ⚠️ 少了它就会按 30 Hz 刷屏：tryGet() 只要收到过**至少一个**包，之后就会永远返回
+    //    最后一个包，且 rx_age_ms 单调增长 ⇒ 每帧都判「掉包 → 保持 → 触发阻尼」
+    //    ⇒ loco 线程每帧 client.Damp() 并打印一行。Damp 幂等（重复发无害），
+    //    但会把真正有用的日志淹掉，正是掉包时最需要看日志的时候。
+    bool damp_latched = false;
+    double next_damp_resend_s = 0.0;   // 闩锁期间 2 Hz 重发 Damp（DDS 尽力而为，单发可能丢）
+    bool opmode_warned = false;        // operator_mode 缺失只告警一次
+    double next_pose_warn_s = 0.0;     // 位姿缺失告警限速（1 Hz）
+    const auto nowSeconds = [] {
+      return std::chrono::duration<double>(
+                 std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
     while (!g_quit.load()) {
       r1skeleton::pico::PicoTeleopPacket pkt;
       double rx_age_ms = 0.0;
@@ -346,8 +405,22 @@ int main(int argc, char** argv) {
       }
       if (first_packet) {
         std::cout << "[pico] first packet seq=" << pkt.sequence
-                  << " model=" << pkt.robot.model << std::endl;
+                  << " model=" << pkt.robot.model
+                  << " sdk=\"" << pkt.sdk << "\""
+                  << " operator_mode=\"" << pkt.operator_mode << "\"" << std::endl;
         first_packet = false;
+      }
+
+      // 诊断：报文里根本没有 operator_mode 键 ⇒ 解析端 fail-safe 兜底成 "stop_signal"
+      // ⇒ safeToExecute() 恒 false ⇒ 每个包都进 kHold 并 Damp()，腿一直是软的。
+      // 现象与"包收得很正常"无法区分，必须显式告警。最常见原因：装了旧的 :app
+      // （sdk=pico-openxr-bridge，从不发该字段），而不是实机主 App :openxr-app。
+      if (!opmode_warned && !pkt.operator_mode_present) {
+        opmode_warned = true;
+        std::cout << "[pico] ⚠ 报文缺少 operator_mode 字段，已按 stop_signal 兜底 ⇒ 不会遥操。\n"
+                     "       请确认头显里装的是 :openxr-app（sdk=\"pico-openxr-single\"），"
+                     "不是旧的 :app（\"pico-openxr-bridge\"）。本包 sdk=\""
+                  << pkt.sdk << "\"" << std::endl;
       }
 
       // 位姿来源：controllers=原始(无校准，与宇树 televuer 同源) / teleop=校准后端点
@@ -392,7 +465,25 @@ int main(int argc, char** argv) {
         //    底盘速度归零；掉包或 stop_signal 时额外触发阻尼。
         case r1skeleton::pico::Disposition::kHold: {
           cmd_vx.store(0); cmd_vy.store(0); cmd_vyaw.store(0);
-          if (r1skeleton::pico::holdTriggersDamp(pkt, rx_age_ms, kStaleMs)) damp_cmd.store(true);
+          // 掉包 / stop_signal → 阻尼。**边沿触发 + 2 Hz 重发**（2026-10-08）：
+          //   已闩锁时不再打日志（原来会 30 Hz 刷屏），但仍每 0.5 s 重发一次命令 ——
+          //   DDS 是尽力而为，只发一次有可能丢，丢了腿就不会变软（这是安全相关的动作）。
+          if (r1skeleton::pico::holdTriggersDamp(pkt, rx_age_ms, kStaleMs)) {
+            const double now = nowSeconds();
+            if (!damp_latched) {
+              damp_latched = true;
+              next_damp_resend_s = now + 0.5;
+              damp_cmd.store(true);
+              std::cout << "[pico] 掉包或 stop_signal：进入阻尼（腿变软），双臂保持。"
+                           "恢复发送后需操作者显式重新站立（stdin 's'），本端不自动复位。"
+                           "（本行只打一次，不再逐帧刷屏）" << std::endl;
+            } else if (now >= next_damp_resend_s) {
+              next_damp_resend_s = now + 0.5;
+              damp_cmd.store(true);
+            }
+          } else {
+            damp_latched = false;   // 包恢复新鲜 → 解除闩锁（下次掉包会重新提示）
+          }
           hand.update(idle, hand_state, pico_dt);
           break;
         }
@@ -406,15 +497,19 @@ int main(int argc, char** argv) {
         std::cout << "[pico] 急停闩锁已解除（等待操作者重新站立）。" << std::endl;
       }
 
+      // 只要本帧不是「保持」，链路/状态就已经变了 ⇒ 解除掉包阻尼闩锁。
+      // 少了这一句闩锁会一直粘住：掉包→恢复→再掉包时不会重新提示、也不再触发 Damp。
+      if (disp != r1skeleton::pico::Disposition::kHold) damp_latched = false;
+
       if (disp != r1skeleton::pico::Disposition::kTeleop) {
         std::this_thread::sleep_for(std::chrono::duration<double>(pico_dt));
         continue;
       }
 
-      // 首个安全包：让机器人站立（此后由 PICO 底盘指令控制）
+      // 首个可执行包：只解锁底盘速度闸门，**默认不切 FSM**（见文件头与 loco 线程注释）。
       if (!ever_safe) {
         ever_safe = true;
-        auto_stand_pico.store(true);
+        first_exec_pkt.store(true);
       }
 
       // ——双臂：所选来源位姿 -> OpenXR 4x4 -> 对齐 -> IK——
@@ -433,6 +528,19 @@ int main(int argc, char** argv) {
         }
         q = ik.solve(Lrobot, Rrobot, arm.currentArmQ());
         arm.setTargets(q, zero_tau);
+      } else {
+        // 判据已放行 kTeleop（quality == "live"），但 JSON 里连 pose 对象都没有
+        // ⇒ 双臂**静默不动、且一行日志都没有**。这与"权重 100 但什么都不动"的
+        // 历史故障现象完全一致，极难排查，故显式限速告警（1 Hz）。
+        const double now = nowSeconds();
+        if (now >= next_pose_warn_s) {
+          next_pose_warn_s = now + 1.0;
+          std::cout << "[pico] ⚠ 已放行遥操但位姿缺失：source=" << pico_source
+                    << " left.pose=" << (leftS.pose.valid ? "ok" : "缺失")
+                    << " right.pose=" << (rightS.pose.valid ? "ok" : "缺失")
+                    << " ⇒ 双臂不会动。检查 App「发送内容」页是否勾选了该模块。"
+                    << std::endl;
+        }
       }
 
       // ——灵巧手——
