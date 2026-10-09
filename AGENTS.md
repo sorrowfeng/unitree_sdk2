@@ -5,7 +5,8 @@
 > 父目录 `RobotProject/` 本身**不是** git 仓库，还放着无关的 `tl_vision_grasp_ws/`（别动）。
 >
 > **深度资料指针**（细节不在本文件）：
-> - **上机指令 Runbook（单页速查，操作台前照着敲）** → `example/r1/high_level/R1_TELEOP_RUNBOOK.md`
+> - **启动遥操：最简命令流程** → `example/r1/high_level/R1_TELEOP_QUICKSTART.md`（**先看这个**，只有命令）
+> - 上机指令 Runbook（多判据/排障二分表/红线） → `example/r1/high_level/R1_TELEOP_RUNBOOK.md`
 > - 完整上机手册（原理、日志解读、网络四方案、故障二分） → `example/r1/high_level/R1_TELEOP_STARTUP.md`
 > - 背包/游标/灵巧手普查档案 → `example/r1/high_level/R1_BACKPACK_ARCHITECTURE.md`
 > - 算法/参数与官方对照 → `example/r1/high_level/R1_CONTROL_ALGORITHM.md`
