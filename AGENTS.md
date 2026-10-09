@@ -61,8 +61,9 @@ RobotProject/
 | `r1_pico_udp.h` | PICOHandLink UDP-JSON v3 接收与解析 |
 | `r1_pico_safety_policy.h` | **处置判据单一来源**：`decideDisposition()`，优先级 急停 > 回零 > 保持 > 遥操 |
 | `r1_xr_pose_alignment.h` | OpenXR → R1 腰部/骨盆系对齐 |
-| `r1_hand_interface.h` | 手驱动**接口**（默认 `NullHandDriver`） |
-| `r1_hand_dds.h` | 灵巧手 **DDS 驱动**（HandProfile + 三家厂商预设 + `DdsHandDriver`）。**默认未接主程序**；只发 DDS，不碰串口 |
+| `r1_hand_interface.h` | 手驱动**接口**（`HandDriver`；默认 `NullHandDriver` 只打印） |
+| `r1_hand_canfd_bridge.h` | **灵巧手 CANFD 桥驱动（实际在用）**：把遥操手部位置经 UDP 转发给 `hand_bridge.py`。见 §8 |
+| `r1_hand_dds.h` | 灵巧手 DDS 驱动（三家厂商预设）。**已弃用仅留参考** —— 本项目实际用的手不在那三家之列 |
 | `r1_tool.cpp` | 官方全部服务 CLI 测试工具；target `r1_tool` |
 | `tests/test_pico_parse.cpp` | 不接机器人的 PICO 报文解析/判据单测 |
 
@@ -84,6 +85,12 @@ RobotProject/
 | `scripts/hand_modbus_probe.py` | 灵巧手 Modbus 探针（适配新手用） |
 | `scripts/pico_sim_sender.py` | **假装头显**的模拟发送器，真机排练用 |
 | `scripts/pico_udp_relay.py` | **方案 C2 单向 UDP 中继**（PICO → Mac → 有线 → 背包）。零 root / 零 NAT；启动时自动打印 PICO 该填哪个地址 |
+| `scripts/hand_canfd.py` | **灵巧手 CANFD 封装**（`LHandCanfd`）：协议常量、回环/反馈分离、语义化 API。见 §8 |
+| `scripts/hand_bridge.py` | **灵巧手桥进程**：独占 CANFD 适配器、启动时初始化、把遥操位置直接映射到手上 |
+| `scripts/hand_canfd.sh` | 上述灵巧手工具的**跨平台入口**（自动处理 macOS libusb 路径、`-u` 无缓冲） |
+| `scripts/check_comms.py` | 灵巧手只读通讯验证；`--scan` 按节点找总线上的手 |
+| `scripts/test_hand_canfd.py` | 灵巧手编码器逐字节自检 + 双手运动测试 |
+| `scripts/hand_rs485_bringup.py` | 灵巧手 **RS485** 打通脚本（**备用路线**，现走 CANFD） |
 
 ## 4. 开发工作流（务必遵守）
 
@@ -169,8 +176,8 @@ LocoClient ──▶ 机载运控 ai_sport（站立/行走/阻尼/零力矩）
 
 - 头/腰遥操跟随未实现（仅启动回零）。⚠️ App 默认**不发** `robot_control.head`/`body.waist`，
   除了改代码还要在 App「发送内容」页勾选；且 `WaistRoll(12)` 写不生效（运控独占）。
-- 灵巧手：`r1_hand_dds.h` 已写好但**未接进主程序**；且手未接入实物
-  （现无任何 `/dev/ttyHand*|ttyUSB*|ttyACM*`）。接法 = 加一条 `HandProfile` + 跑厂商桥进程，驱动零改动。
+- 灵巧手：**已接入主程序**（CANFD 桥，见 §8）。`r1_hand_dds.h`（DDS 厂商桥那条路）
+  **已弃用仅留参考** —— 那三家（BrainCo/Linker/Inspire）不是本项目实际用的手。
 - `r1_xr_pose_alignment.h` 腰部偏移 `+0.15x/+0.45z` 为常量，上机需标定。
 - C++ IK 用 DLS 最小化官方的**完整四项**目标（pos/rot/正则/平滑），已与官方 IPOPT 逐点对照
   （`sim/check_ik_vs_official.py`，A5 最大偏差 2.79 mm）；仍非逐位一致。
@@ -190,7 +197,90 @@ LocoClient ──▶ 机载运控 ai_sport（站立/行走/阻尼/零力矩）
 **设计选择（不是缺陷）：** 掉包（>600 ms）或急停触发阻尼后**不自动重新站立**，
 需操作者显式 `s`（PICO 站立键）。与官方 `xr_teleoperate` 一致，避免链路抖动后自行起身。
 
-## 8. 红线清单（背下来）
+## 8. 灵巧手（CANFD 直控，2026-10-09 落地）
+
+**实际硬件**：LHandPro **`DH116S-L000-A1`(左) / `DH116S-R000-A1`(右)**，各 6 自由度。
+USB-CANFD 适配器 **`a8fa:8598`**（Com Equipment "CANFD Analyser"，gs_usb 用户态协议），
+两只手挂**同一条总线**，靠 **node id** 区分（默认 1 / 2）。
+
+### 8.1 为什么弃用厂商 SDK（硬性 ABI 不兼容）
+`libLHandProLib.so` 是在 **Ubuntu 22.04 / GCC 11** 上编的，要求
+`GLIBCXX_3.4.30` + **`GLIBC_2.34`**（还带 `GLIBC_2.32`）；而背包是 **Ubuntu 20.04 / glibc 2.31**、
+`libstdc++` 只到 `GLIBCXX_3.4.28` ⇒ **`ctypes.CDLL` 直接失败**
+（`version 'GLIBCXX_3.4.29' not found`）。**换 libstdc++ 也救不了** —— glibc 是整个 C 运行时。
+⇒ 手的 CAN 帧协议极简单，**直接发原始帧**，完全绕开 SDK。
+
+### 8.2 协议（由厂商示例帧逐字节解出，脚本内有自检）
+```
+CAN ID    = 0x500 + node_id
+14B 数据  = <cmd:1> <轴数:1=0x06> <6×2 字节小端数值>
+  cmd 0x01 模式：0x0120 使能 · 0x0425 回零 · 0x0020 切回位置模式
+  cmd 0x02 位置（0..10000，总行程系数 10000 ⇒ 0x03E8=1000=10% 行程）
+  cmd 0x03 速度（0x07D0=2000 ≈ 0.5 s 走完全行程）
+  cmd 0x04 电流上限（0x03E8=1000 = 100% 额定，千分比）
+反馈  = 0x480+node（控制）/ 0x580+node（SDO）
+```
+⚠️ **`0x500+node` 是适配器把自己发出去的帧"回环"回来，不是手的反馈** ——
+两者必须分开统计，否则会得出"手在应答"的假象（我第一版就踩了）。
+⚠️ **`00 02 50 01` 是「开启异步反馈上报」**，对每个节点各发一条。
+**运动本身不需要它**（真机 ID 1 未开反馈也能动）；只有想读状态/确认"手在线"时才发。
+发了之后设备约 **1000 帧/秒**持续上报。
+
+### 8.3 架构：C++ ↔ Python 桥
+C++ 侧要用 gs_usb 就得在背包上编译 `gsusb-canfd` 的 C++ 库；而 Python 那套
+（`canfd_lib` + `gsusb_canfd` + pyusb 1.2.1）已真机验证且**离线部署完成**。故拆成桥：
+
+```
+r1_dual_arm_loco.cpp ──UDP 127.0.0.1:9998──> hand_bridge.py ──CANFD──> 两只手
+   （--hand canfd）        "POS l0..l5 r0..r5 mask"      独占适配器
+```
+
+- **C++**：`r1_hand_canfd_bridge.h` 的 `CanfdBridgeHandDriver` 实现现有 `HandDriver` 接口，
+  只把 6+6 个关节目标（0..10000）组一行文本发 UDP。
+- **Python**：`scripts/hand_bridge.py` **启动时**走完初始化
+  （使能 → 回零(等 `--home-wait`) → 位置模式 → 速度 → 电流），之后**位置直接映射**，零换算。
+- ⚠️ **安全语义**：主循环只在**遥操分支**传 `mode=kPose`；急停/掉包/保持/回零都传 `kIdle`。
+  驱动**只在 kPose 时发送** ⇒ 手保持在最后位置不动（与双臂"保持"一致）。
+  桥侧另有 `--timeout`（默认 1 s）没收到新位置就停止下发。
+
+### 8.4 用法
+```bash
+# ① 先起桥（会初始化两只手，回零约 4~5 s/只）
+~/r1_hand/hand_canfd.sh hand_bridge.py --left 1 --right 2
+#   看到 "[bridge] ✅ 就绪：..." 再往下走
+# ② 另一个 tmux window 起遥操
+build/bin/r1_dual_arm_loco_skeleton eth10 --pico 9999 --variant a5 --hand canfd
+```
+不加 `--hand` 时行为**完全不变**（默认 `null`，只打印 6 路 raw）。
+
+### 8.5 坑（都是实测踩到的）
+1. **回环 ≠ 反馈**（见 8.2）——按 CAN ID 分开统计。
+2. **逐帧日志刷屏**：开反馈后 ~1000 帧/秒。`LHandCanfd(log_frames=False)` 关掉；
+   生命周期日志（扫描/连接/初始化/关闭）不受影响。
+3. **stdout 块缓冲**：非 TTY（后台/管道/ssh）下 Python 输出被缓冲，**看不到任何进度**，
+   极易误判成"没跑起来"。统一走 `scripts/hand_canfd.sh`（内部 `python3 -u`）。
+4. **适配器 USB 不稳**：`a8fa:8598` 会反复 disconnect→重枚举（先 `a8fa:0008` 后 `8598`，
+   是 Artery MCU 的 bootloader→firmware 切换）。掉了要重插。
+5. **非 root 访问**：需 udev 规则 `/etc/udev/rules.d/hcanbus.rules`
+   （`a8fa`/`8598` → `MODE=0666`），否则打不开 USB 设备。
+6. **离线依赖**：背包无网、apt 坏。`~/r1_hand/` 里已放好
+   `canfd_lib.py` + `gsusb_canfd/` + `usb/`(pyusb **1.2.1**，**1.3.x 要求 Python≥3.9 用不了**)；
+   **pyusb 是纯 Python，直接拷 `usb/` 目录即可，不需要 pip**。
+7. **macOS 本地也能测**：需 `DYLD_LIBRARY_PATH` 指向 Homebrew 的 libusb
+   （否则 `no USB backend available`），`hand_canfd.sh` 已自动处理。
+   `~/r1_hand/` 是本地运行目录，布局与背包一致。
+
+### 8.6 相关文件
+| 文件 | 作用 |
+|---|---|
+| `r1_hand_canfd_bridge.h` | C++ 桥驱动（UDP 转发，实现 `HandDriver`） |
+| `scripts/hand_canfd.py` | **封装**：`LHandCanfd` + `build_payload()`（协议常量、回环/反馈分离、`start_feedback()`） |
+| `scripts/hand_bridge.py` | **桥进程**：独占适配器 + 启动初始化 + 位置直接映射 |
+| `scripts/check_comms.py` | 只读通讯验证；`--scan` 按节点找总线上的手 |
+| `scripts/test_hand_canfd.py` | 编码器逐字节自检 → 双手初始化 → 运动 → 统计 |
+| `scripts/hand_canfd.sh` | 跨平台入口（自动处理 macOS libusb 路径，`-u` 无缓冲） |
+
+## 9. 红线清单（背下来）
 
 1. ⛔ **绝不 `kill -9`**：权重停在 100 且不再发布 ⇒ 双臂**冻结在最后一帧姿态**。真发生了就重跑程序再正常退出。
 2. ⛔ **不与 `r1_arm_manual` 同时跑**：两个程序互抢 `rt/arm_sdk`。
@@ -208,7 +298,7 @@ LocoClient ──▶ 机载运控 ai_sport（站立/行走/阻尼/零力矩）
 8. ⚠️ **危险运控操作**（zero-torque、move、msc release）保持二次确认与安全距离提示；
    命令式切 FSM 用 `loco.sh`（默认带 YES 确认），`r1_tool.py` 的脚本化形式**无确认**。
 
-## 9. 约定
+## 10. 约定
 
 - 全程中文交流/注释（沿用现有风格）。
 - **未经明确要求不要 git commit / push**；本项目文件多为 untracked。
