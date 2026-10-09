@@ -32,6 +32,9 @@ CAN ID      = `0x500 + node_id`（node_id 默认：左手 1、右手 2）
     bus.init_hand(1)                   # 使能 → 回零(等5s) → 位置模式 → 速度/电流
     bus.set_position(1, 1000)          # 走到 10% 行程
     bus.close()
+
+    # 想看反馈（确认手在线）时才开：
+    bus.start_feedback(1)              # 发 00 02 50 01，之后持续收 0x480+node
 """
 
 import time
@@ -63,8 +66,9 @@ MODE_HOME = 0x0425        # 每个轴回零
 MODE_POSITION = 0x0020    # 切回位置模式
 
 # 开启**异步反馈上报**的报文（厂商提供）：`00 02 50 01`。
-# ⚠️ 必须在**任何其它命令之前**、对每个节点各发一条，否则设备不主动上报，
-#    现象就是"只看到自己的回环帧、看不到 0x480+node 的反馈"。
+# 实测：**运动本身不需要它**（真机 ID 1 未开反馈也能动）；
+# 只有想读状态、确认"手在线"时才发。发了之后设备持续上报 `0x480+node`；
+# 不发则只看到自己的回环帧，很容易误判成"通讯没通 / 手没应答"。
 FEEDBACK_START_FRAME = bytes.fromhex("00025001")
 
 DEFAULT_VELOCITY = 2000   # ≈0.5 s 走完全行程
@@ -266,9 +270,16 @@ class LHandCanfd:
     def init_hand(self, node: int, home_wait: float = 5.0,
                   enable_wait: float = 1.0,
                   velocity: int = DEFAULT_VELOCITY,
-                  current: int = DEFAULT_CURRENT) -> None:
-        """初始化三步 + 运动参数：开反馈 → 使能 → 回零(等 home_wait) → 位置模式 → 速度/电流。"""
-        self.start_feedback(node)          # ⚠️ 必须先开，否则拿不到 0x480 反馈
+                  current: int = DEFAULT_CURRENT,
+                  feedback: bool = False) -> None:
+        """初始化三步 + 运动参数：使能 → 回零(等 home_wait) → 位置模式 → 速度/电流。
+
+        `feedback=True` 时**额外**先发 `00 02 50 01` 开启异步反馈上报。
+        实测：**运动本身不需要开反馈**（真机 ID 1 在没开反馈时也动了）；
+        只有想读状态、确认"手在线"时才需要开 —— 开了会持续上报 `0x480+node`。
+        """
+        if feedback:
+            self.start_feedback(node)
         self._log(f"[hand {node}] 使能 ...")
         self.enable(node)
         time.sleep(enable_wait)

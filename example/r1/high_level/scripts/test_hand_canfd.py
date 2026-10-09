@@ -63,6 +63,8 @@ def main() -> int:
     ap.add_argument("--position", type=int, default=1000, help="运动目标（0..10000）")
     ap.add_argument("--sweep", action="store_true", help="来回扫：0→target→0")
     ap.add_argument("--rx-wait", type=float, default=1.0, help="发完后等反馈的秒数")
+    ap.add_argument("--feedback", action="store_true",
+                    help="额外开启异步反馈上报（00 02 50 01）。运动不需要它，只有想看状态/确认在线时才加")
     args = ap.parse_args()
 
     if selfcheck() != 0:
@@ -77,9 +79,12 @@ def main() -> int:
         bus.open()
 
         # ---- 1. 逐手初始化：使能 → 回零 → 位置模式 → 速度/电流 ----
+        # 注意：默认**不开**反馈上报（运动不需要）；要读状态加 --feedback
+        print(f"反馈上报: {'开启' if args.feedback else '关闭（默认，运动不需要）'}")
         for node in args.nodes:
             bus.init_hand(node, home_wait=args.home_wait,
-                          velocity=args.velocity, current=args.current)
+                          velocity=args.velocity, current=args.current,
+                          feedback=args.feedback)
 
         # ---- 2. 分批下发位置，观察运动 ----
         target = args.position
