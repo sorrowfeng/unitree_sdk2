@@ -64,4 +64,6 @@ elif [ -f "$SCRIPT_DIR/$TARGET" ]; then
 fi
 [ -f "$TARGET" ] || { echo "找不到脚本: $TARGET" >&2; exit 2; }
 
-exec "$PY" "$TARGET" "$@"
+# -u：无缓冲。长跑进程（如 hand_bridge.py）在非 TTY（管道/后台/ssh）下会被块缓冲，
+#     不加 -u 就看不到任何进度输出，极易误判成"没跑起来"。
+exec "$PY" -u "$TARGET" "$@"

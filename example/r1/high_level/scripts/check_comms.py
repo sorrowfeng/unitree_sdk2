@@ -18,7 +18,8 @@ def scan_nodes(args) -> int:
     """对 node 1..N 逐个发"开启反馈"，看哪些节点真的会上报。"""
     bus = LHandCanfd(nom_baudrate=args.nom_baudrate,
                      dat_baudrate=args.dat_baudrate,
-                     log=(None if args.quiet else print))
+                     log_frames=(not args.quiet),
+                     log=print)
     found = []
     try:
         bus.open()
@@ -57,7 +58,8 @@ def main() -> int:
 
     bus = LHandCanfd(nom_baudrate=args.nom_baudrate,
                      dat_baudrate=args.dat_baudrate,
-                     log=(None if args.quiet else print))
+                     log_frames=(not args.quiet),
+                     log=print)
     try:
         bus.open()
         for node in args.nodes:

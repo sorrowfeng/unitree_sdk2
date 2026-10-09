@@ -63,6 +63,7 @@ def main() -> int:
     ap.add_argument("--position", type=int, default=1000, help="运动目标（0..10000）")
     ap.add_argument("--sweep", action="store_true", help="来回扫：0→target→0")
     ap.add_argument("--rx-wait", type=float, default=1.0, help="发完后等反馈的秒数")
+    ap.add_argument("--verbose", action="store_true", help="逐帧打印 CAN 收发（排查用）")
     ap.add_argument("--feedback", action="store_true",
                     help="额外开启异步反馈上报（00 02 50 01）。运动不需要它，只有想看状态/确认在线时才加")
     args = ap.parse_args()
@@ -74,7 +75,8 @@ def main() -> int:
         return 0
 
     bus = LHandCanfd(nom_baudrate=args.nom_baudrate,
-                     dat_baudrate=args.dat_baudrate)
+                     dat_baudrate=args.dat_baudrate,
+                     log_frames=args.verbose)
     try:
         bus.open()
 

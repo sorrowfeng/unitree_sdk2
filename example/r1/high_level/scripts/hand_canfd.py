@@ -104,12 +104,16 @@ class LHandCanfd:
     def __init__(self, driver: str = "gsusb",
                  nom_baudrate: int = 1_000_000, dat_baudrate: int = 5_000_000,
                  device_index: Optional[int] = None,
+                 log_frames: bool = True,
                  log: Optional[Callable[[str], None]] = print):
         self._adapter = CANFD(driver=driver)
         self._nom = nom_baudrate
         self._dat = dat_baudrate
         self._device_index = device_index
         self._log = log if log is not None else (lambda _m: None)
+        # ⚠️ 逐帧打印 TX/RX。开启反馈后设备约 1000 帧/秒持续上报，正常使用务必设 False
+        #    （长跑的 hand_bridge.py 就是）；生命周期日志（扫描/连接/初始化/关闭）不受影响。
+        self._log_frames = log_frames
         self._opened = False
 
         self._rx_count = 0                       # 收到的全部帧
@@ -178,9 +182,10 @@ class LHandCanfd:
             kind, node = "?", -1
             self._other_ids[can_id] = self._other_ids.get(can_id, 0) + 1
 
-        self._log(f"[canfd] RX id=0x{can_id:03X} ({kind} node={node}) "
-                  f"len={len(data)} data={data[:16].hex(' ').upper()}"
-                  + (" ..." if len(data) > 16 else ""))
+        if self._log_frames:
+            self._log(f"[canfd] RX id=0x{can_id:03X} ({kind} node={node}) "
+                      f"len={len(data)} data={data[:16].hex(' ').upper()}"
+                      + (" ..." if len(data) > 16 else ""))
 
     # ------------------------------------------------------------------ 统计
     @property
@@ -215,7 +220,8 @@ class LHandCanfd:
         can_id = self.can_id(node)
         self._tx_ids.add(can_id)
         self._adapter.send(can_id, payload)
-        self._log(f"[canfd] TX node={node} id=0x{can_id:03X} "
+        if self._log_frames:
+            self._log(f"[canfd] TX node={node} id=0x{can_id:03X} "
                   f"cmd=0x{cmd:02X} data={payload.hex(' ').upper()}")
         if settle_s > 0:
             time.sleep(settle_s)
@@ -226,7 +232,8 @@ class LHandCanfd:
         can_id = self.can_id(node)
         self._tx_ids.add(can_id)
         self._adapter.send(can_id, bytes(payload))
-        self._log(f"[canfd] TX(raw) node={node} id=0x{can_id:03X} "
+        if self._log_frames:
+            self._log(f"[canfd] TX(raw) node={node} id=0x{can_id:03X} "
                   f"data={bytes(payload).hex(' ').upper()}")
         if settle_s > 0:
             time.sleep(settle_s)

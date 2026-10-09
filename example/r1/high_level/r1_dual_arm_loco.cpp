@@ -40,6 +40,7 @@
 #include <csignal>
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -62,6 +63,7 @@
 // R1 骨架
 #include "r1_arm_ik.h"
 #include "r1_arm_controller.h"
+#include "r1_hand_canfd_bridge.h"
 #include "r1_hand_interface.h"
 #include "r1_pico_udp.h"
 #include "r1_pico_safety_policy.h"
@@ -92,6 +94,11 @@ void printUsage(const char* prog) {
     "                            默认关：官方遥操不切 FSM，要求机器人已在 811 主运控\n"
     "  --pico-frame head_yaw|head_trans|basis   双臂参考系（默认 head_yaw）\n"
     "  --pico-source controllers|teleop   位姿来源（默认 controllers=原始数据，对齐宇树摇操）\n"
+    "  --hand null|canfd[:port]  灵巧手驱动（默认 null=只打印 6 路 raw 验证链路）。\n"
+    "                            canfd=把遥操手部位置经 UDP 转发给 scripts/hand_bridge.py，\n"
+    "                            由它独占 CANFD 适配器落到手上；需**先起桥**（桥在启动时\n"
+    "                            完成 使能→回零→位置模式→速度→电流，约 12 s/两只手）。\n"
+    "                            急停/掉包/保持/回零时本端不下发，手保持在最后位置。\n"
     "  --vx --vy --vyaw          初始移动速度\n"
     "stdin(非pico): v vx vy vyaw | s | d | t | q\n";
 }
@@ -114,6 +121,8 @@ int main(int argc, char** argv) {
   int pico_port = 9999;
   std::string pico_frame = "head_yaw";
   std::string pico_source = "controllers";  // controllers=原始(对齐宇树) / teleop=校准后端点
+  std::string hand_mode = "null";           // 灵巧手驱动：null（默认，只打印）/ canfd（走 UDP 桥）
+  int hand_port = 9998;                     // canfd 模式：hand_bridge.py 的监听端口
   double vx = 0.0, vy = 0.0, vyaw = 0.0;
 
   for (int i = 2; i < argc; ++i) {
@@ -140,6 +149,19 @@ int main(int argc, char** argv) {
       pico_source = argv[++i];
       if (pico_source != "controllers" && pico_source != "teleop") {
         std::cerr << "[main] unknown --pico-source: " << pico_source << std::endl;
+        return 1;
+      }
+    } else if (a == "--hand" && i + 1 < argc) {
+      hand_mode = argv[++i];
+      // 支持 "canfd:9998" 形式就地指定桥的 UDP 端口
+      const auto colon = hand_mode.find(':');
+      if (colon != std::string::npos) {
+        hand_port = std::atoi(hand_mode.c_str() + colon + 1);
+        hand_mode = hand_mode.substr(0, colon);
+      }
+      if (hand_mode != "null" && hand_mode != "canfd") {
+        std::cerr << "[main] unknown --hand: " << hand_mode
+                  << " (expect null|canfd[:port])" << std::endl;
         return 1;
       }
     }
@@ -180,10 +202,18 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  // ---- 灵巧手（预留接口，默认空驱动） ----
-  r1skeleton::NullHandDriver hand;
+  // ---- 灵巧手 ----
+  // null（默认）：只打印 6 路 raw 验证链路；canfd：把位置经 UDP 转发给
+  // scripts/hand_bridge.py，由它独占 CANFD 适配器落到手上（见 r1_hand_canfd_bridge.h）。
+  std::unique_ptr<r1skeleton::HandDriver> hand;
+  if (hand_mode == "canfd") {
+    hand = std::make_unique<r1skeleton::CanfdBridgeHandDriver>(
+        static_cast<uint16_t>(hand_port));
+  } else {
+    hand = std::make_unique<r1skeleton::NullHandDriver>();
+  }
   r1skeleton::HandState hand_state;
-  hand.init();
+  hand->init();
 
   // ---- PICO UDP 接收线程 ----
   r1skeleton::pico::PicoUdpThread pico_udp(static_cast<uint16_t>(pico_port));
@@ -450,7 +480,7 @@ int main(int argc, char** argv) {
                          "恢复需操作者显式重新站立（stdin 's'），本端不自动复位。"
                       << std::endl;
           }
-          hand.update(idle, hand_state, pico_dt);
+          hand->update(idle, hand_state, pico_dt);
           break;
         }
         // ② 一键回零：双臂目标归零，底盘停止。只要求包新鲜——回零期间 operator_mode
@@ -458,7 +488,7 @@ int main(int argc, char** argv) {
         case r1skeleton::pico::Disposition::kReturnZero: {
           cmd_vx.store(0); cmd_vy.store(0); cmd_vyaw.store(0);
           arm.setTargets(Eigen::VectorXd::Zero(2 * n), zero_tau);
-          hand.update(idle, hand_state, pico_dt);
+          hand->update(idle, hand_state, pico_dt);
           break;
         }
         // ③ 保持：未安全/掉包/来源无效。不更新双臂目标（250Hz 内部循环保持上次目标），
@@ -484,7 +514,7 @@ int main(int argc, char** argv) {
           } else {
             damp_latched = false;   // 包恢复新鲜 → 解除闩锁（下次掉包会重新提示）
           }
-          hand.update(idle, hand_state, pico_dt);
+          hand->update(idle, hand_state, pico_dt);
           break;
         }
         case r1skeleton::pico::Disposition::kTeleop:
@@ -545,7 +575,7 @@ int main(int argc, char** argv) {
 
       // ——灵巧手——
       const r1skeleton::HandAction action = makeHandAction(leftS, rightS, pkt.robot);
-      hand.update(action, hand_state, pico_dt);
+      hand->update(action, hand_state, pico_dt);
 
       // ——底盘速度：优先 robot_control.base，否则手柄摇杆（限幅 0.3）——
       if (pkt.robot.has_base) {
@@ -587,7 +617,7 @@ int main(int argc, char** argv) {
         action.left_finger[i] = grip;
         action.right_finger[i] = grip;
       }
-      hand.update(action, hand_state, dt);
+      hand->update(action, hand_state, dt);
 
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -619,7 +649,7 @@ int main(int argc, char** argv) {
         action.left_finger[i] = grip;
         action.right_finger[i] = grip;
       }
-      hand.update(action, hand_state, dt);
+      hand->update(action, hand_state, dt);
 
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -632,7 +662,7 @@ int main(int argc, char** argv) {
   if (loco_thread.joinable()) loco_thread.join();
   pico_udp.stop();
   arm.goHomeAndRelease();
-  hand.stop();
+  hand->stop();
   arm.stop();
   std::cout << "[main] done." << std::endl;
   return 0;
