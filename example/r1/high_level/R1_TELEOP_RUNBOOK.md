@@ -112,21 +112,19 @@ ss -lun | grep -E "9998|9999" || echo "(端口空闲)"
 lsusb | grep a8fa                              # 灵巧手 CANFD 适配器在不在
 ```
 
-## 6️⃣ 背包：把机器人弄到 811 主运控
+## 6️⃣ 背包：切模式 —— **阻尼 → 锁定站立 → 走跑**（必须按顺序）
 
-**当前可能是 FSM 0（完全失力/瘫软）**——那就先让它站起来，别直接 `start`：
+⛔ **不能直接 `start`**（走跑）。必须三步按顺序走：
 
 ```bash
 example/r1/high_level/scripts/loco.sh status    # 先看当前 FSM
-# 若是 0（失力）或 1（阻尼）：先站起来（⚠️ 确认有支撑）
-example/r1/high_level/scripts/loco.sh damp      # → FSM 1 安全态
-example/r1/high_level/scripts/loco.sh stand     # → FSM 4 站立（机器人会真的起身）
-
-# 再到 811
-example/r1/high_level/scripts/loco.sh start     # → FSM 811 主运控
+example/r1/high_level/scripts/loco.sh damp      # ① → FSM 1    阻尼
+example/r1/high_level/scripts/loco.sh stand     # ② → FSM 4    锁定站立（机器人会真的起身）
+example/r1/high_level/scripts/loco.sh start     # ③ → FSM 811  走跑（主运控）
 example/r1/high_level/scripts/loco.sh status    # 复验：必须 811
 ```
 
+> FSM 对照：`0` 零力矩（完全失力/瘫软）· `1` 阻尼（安全态）· `4` 锁定站立 · **`811` 走跑（主运控）**。
 > 程序**不再自动切 FSM**（2026-09-29 起，对齐官方）。`ret=0` ≠ 切成功，**必须看 status**。
 
 ## 7️⃣ 背包：起灵巧手桥（**必须在遥操之前**）
