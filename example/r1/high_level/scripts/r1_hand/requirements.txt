@@ -1,0 +1,8 @@
+# gsusb-canfd 后端（默认，Windows / Linux / macOS 通用）
+pyusb>=1.2.1
+# 优先使用 PyPI 的 gsusb-canfd（需 >= 0.1.2：open(adapter) / drop_echo）；
+# 未安装时 canfd_lib.py 自动回退到随示例附带的源码副本。
+gsusb-canfd>=0.1.2
+
+# Linux socketcan 后端（gsusb 不可用时回退）
+python-can~=4.6.1

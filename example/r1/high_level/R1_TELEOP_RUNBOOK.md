@@ -89,15 +89,16 @@ ssh unitree@192.168.123.164 'cd ~/unitree_sdk2 && \
 判据：两个 `grep` 都 ≥ 1，且 `bin` 的 mtime **晚于**源码。
 （✅ 用 `grep -ac`；❌ **不要**用 `strings | grep 中文` —— UTF-8 中文会被截断，永远返回 0。）
 
-**灵巧手脚本也要同步**（它们不在 CMake 里，deploy 不会带）：
+**灵巧手整套也要同步**（它不在 CMake 里，`deploy_backpack.sh` 不会带）：
 
 ```bash
+# 源就是仓库里的 scripts/r1_hand/（自包含：含 vendor 依赖）
 # _vm_rsync.exp 的签名：<密码> <port> <user> <host> <src> <dst>
 example/r1/high_level/scripts/_vm_rsync.exp <密码> 22 unitree 192.168.123.164 \
-  ~/r1_hand/ /home/unitree/r1_hand/
+  example/r1/high_level/scripts/r1_hand/ /home/unitree/r1_hand/
 ```
-> 依赖（`canfd_lib.py` + `gsusb_canfd/` + `usb/`）在 `~/r1_hand/` 里，**纯 Python 无需 pip**。
-> ⚠️ pyusb 必须是 **1.2.1**（1.3.x 要求 Python ≥ 3.9，背包是 3.8）。
+> 该目录**纯 Python、无需 pip**（vendor 了 `canfd_lib.py` + `gsusb_canfd/` + pyusb **1.2.1**）。
+> ⚠️ pyusb 必须 1.2.1（1.3.x 要求 Python ≥ 3.9，背包是 3.8）。详见其 `README.md`。
 
 ## 5️⃣ 背包：运行前检查
 

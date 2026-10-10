@@ -19,7 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- 找依赖目录 ----
 DIR=""
-for cand in "${R1_HAND_DIR:-}" "$HOME/r1_hand" "$SCRIPT_DIR"; do
+# 顺序：显式指定 → **脚本自己所在目录**（本目录自包含，仓库里直接可用）→ ~/r1_hand（背包部署位置）
+for cand in "${R1_HAND_DIR:-}" "$SCRIPT_DIR" "$HOME/r1_hand"; do
   [ -n "$cand" ] || continue
   if [ -f "$cand/canfd_lib.py" ] && [ -d "$cand/gsusb_canfd" ]; then
     DIR="$cand"; break
@@ -27,7 +28,7 @@ for cand in "${R1_HAND_DIR:-}" "$HOME/r1_hand" "$SCRIPT_DIR"; do
 done
 if [ -z "$DIR" ]; then
   echo "找不到依赖目录（需要 canfd_lib.py + gsusb_canfd/ + usb/）。" >&2
-  echo "请设置 R1_HAND_DIR，或把依赖放到 ~/r1_hand/。" >&2
+  echo "请设置 R1_HAND_DIR，或在本目录/~/r1_hand 下补齐依赖。" >&2
   exit 1
 fi
 
