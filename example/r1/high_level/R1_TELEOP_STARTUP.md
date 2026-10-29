@@ -27,7 +27,7 @@
 
 - 机器人**吊挂**或有可靠支撑；若要试走跑，地面清空。
 - **臂展范围内无人无物** —— 启动瞬间头 pitch/yaw + `WaistYaw` 会回零（3 秒），接管后双臂也会按指令动作。
-- 灵巧手若已接入，同样清空。
+- 灵巧手若已接入，同样清空 —— **桥启动时两只手会各回零一次**（约 12 s，见 QUICKSTART ③）。
 
 ### 1.2 服务与进程（每次上机都走，别省）
 
@@ -339,7 +339,7 @@ example/r1/high_level/scripts/loco.sh status    # 必须是 811；不是就 loco
 | 2 | `kTeleop` 但 `pose` 缺失时静默不动 | ✅ **已修**：1 Hz 限速告警，明确指出 `source` / 左右 `pose` 是否缺失 / 去 App「发送内容」页勾选 |
 | 3 | `operator_mode` 缺失兜底成 `stop_signal` | ✅ **已修**：新增 `operator_mode_present` 位，缺失时**打一次性告警**并提示「装的是不是旧 `:app`」；`first packet` 日志现在也打印 `sdk` 与 `operator_mode` |
 | 4 | 头/腰跟随未实现（启动回零后锁在 0） | ⏳ 未做。App 已在发 `robot_control.head`/`body.waist`（**需在「发送内容」页勾选**），消费即可；注意 `WaistRoll(12)` 写不生效 |
-| 5 | 灵巧手 `NullHandDriver` | ⏳ 未做。按已定 `HandProfile` 接厂商桥，且**需先确认灵巧手型号** |
+| 5 | 灵巧手 `NullHandDriver` | ✅ **已完成（2026-10-29）**：LHandPro DH116S 两只，**两条独立 USB-CANFD 总线、各一只手、node 都是 1**；C++ 侧只经 UDP 转发位置，由 `scripts/r1_hand/hand_bridge.py` 落到 CAN。启动步骤见 `R1_TELEOP_QUICKSTART.md` ③；协议与坑见 `AGENTS.md` §8。⚠️ 早期的 `HandProfile`/`DdsHandDriver` 方案已弃用 |
 | 6 | 腰部偏移 `0.15/0.45` 为常量 | ⏳ 须上机实测。A5 IK 残差 ~22 mm 是结构固有；整体工作空间可能偏 |
 
 > 第 4/5/6 项都**不阻塞**首次真机遥操联调：4 是功能增强（不动也不会错），

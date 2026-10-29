@@ -22,8 +22,13 @@ Mac  en0 ──► pico_udp_relay.py ──► en5     │
    ▼                                       │
 背包 eth10 :9999 ──► r1_dual_arm_loco_skeleton ──┤
                                           └─ 灵巧手：UDP 127.0.0.1:9998
-                                                    └─► hand_bridge.py ──CANFD──► 两只手
+                                                    └─► hand_bridge.py
+                                                          ├─ USB-CANFD #0 ── 左手（node 1）
+                                                          └─ USB-CANFD #1 ── 右手（node 1）
 ```
+
+> 灵巧手是**两条独立总线、各挂一只手、两只手 node 都是 `1`**，靠适配器区分左右
+> （`LEFT_BUS=0` / `RIGHT_BUS=1`，写在 `~/r1_hand/bridge.sh` 顶部）。
 
 | 角色 | 地址 |
 |---|---|
@@ -139,13 +144,23 @@ tmux new-session -d -s hand \
 sleep 15 && cat /tmp/hand_bridge.log
 ```
 
-看到这一行才算就绪（两只手回零 + 进位置模式，约 12 s）：
+看到这一行才算就绪（两条总线都连上、两只手回零 + 进位置模式，约 12 s）：
 ```
-[bridge] ✅ 就绪：[1, 2] 已进入位置模式，开始接收遥操位置 （下发 ≤50 Hz，1s 无新位置即保持）
+[canfd] 扫描到 2 个 USB-CANFD 适配器：
+[canfd]   #0  serial='F080207F308A3034' ...
+[canfd]   #1  serial='F0802068387F4D4D' ...
+[canfd] [left] 连接 device_index=0 node=1 ...      ← 此刻动的应该是**左手**
+[canfd] [right] 连接 device_index=1 node=1 ...
+[bridge] ✅ 就绪：['left', 'right'] 已进入位置模式，开始接收遥操位置 （下发 ≤50 Hz，1s 无新位置即保持）
 ```
 
+> **顺手验左右**：先打 `[left] 使能/回零` 时应该**左手**动；若动的是右手 ⇒ 反了，
+> 用 `LEFT_BUS=1 RIGHT_BUS=0 ~/r1_hand/bridge.sh` 起（或改 `bridge.sh` 顶部两行）。
+> `device_index` 只是**扫描顺序**，插拔后可能变。
+>
 > 之后遥操程序只把位置发到 UDP 9998，由桥落到 CAN。**桥先起、遥操后起**。
 > 想调试可加 `--verbose`（逐帧打印；⚠️ 开了反馈后约 1000 帧/秒会刷屏）。
+> 只接一只手：`LEFT_BUS=0 RIGHT_BUS=-1 ~/r1_hand/bridge.sh`。
 
 ## 8️⃣ 背包：起遥操程序（**必须在 tmux 里**）
 
