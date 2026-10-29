@@ -10,7 +10,7 @@
 > - 完整上机手册（原理、日志解读、网络四方案、故障二分） → `example/r1/high_level/R1_TELEOP_STARTUP.md`
 > - 背包/游标/灵巧手普查档案 → `example/r1/high_level/R1_BACKPACK_ARCHITECTURE.md`
 > - 算法/参数与官方对照 → `example/r1/high_level/R1_CONTROL_ALGORITHM.md`
-> - 逐日工作记忆 → `.workbuddy/memory/`（**已 gitignore**，`MEMORY.md` 是长期硬规则）
+> - **项目时间线 / 环境备忘 → `docs/`**（`HISTORY.md` 关键决策与踩坑缘由；`ENVIRONMENT.md` 主机级坑：apt 坏、时钟漂移、fishros 菜单、CRLF）
 > - AI 技能库 → `~/.workbuddy/skills/`（`r1-edu-backpack-deploy` 等，按需加载）
 
 ## 1. 项目目标
@@ -41,7 +41,7 @@ RobotProject/
 ├── unitree_sdk2/                  ← 主工作仓库（origin=官方只读 / fork=sorrowfeng，本地有未提交改动）
 │   ├── AGENTS.md                  ← 本文件
 │   ├── sim/                       ← macOS 侧仿真/校验工具（见 §4.1，不入 CMake 构建）
-│   ├── .workbuddy/                ← 逐日工作记忆（gitignore）
+│   ├── docs/                      ← 项目时间线（HISTORY.md）/ 环境备忘（ENVIRONMENT.md）
 │   ├── submodules/
 │   │   ├── hand_control_ws/       ← sorrowfeng/hand_control_ws（灵巧手 ROS 2 工作区）
 │   │   └── xr_teleoperate/        ← unitreerobotics/xr_teleoperate（官方 Python 摇操，**仅作参考**）
@@ -215,6 +215,15 @@ USB-CANFD #1 ── 右手（node 1）
 > 2026-10-29 改的拓扑：以前是**一条总线挂两个节点（1/2）**，靠 node id 区分左右；
 > 现在两条总线上的 CAN ID 完全相同（都 `0x501`/`0x481`），靠适配器区分，互不干扰。
 
+| device_index | serial（实测） | 手 |
+|---|---|---|
+| **0** | `F080207F308A3034` | **左手** |
+| **1** | `F0802068387F4D4D` | **右手** |
+
+⚠️ `device_index` 是**扫描顺序**，插拔后可能变。左右反了就对调 `--left-bus/--right-bus`
+（或改 `scripts/r1_hand/bridge.sh` 顶部的 `LEFT_BUS/RIGHT_BUS`）。判据：起桥时日志先打
+`[left] 使能/回零` —— 此刻**左手**动就对。
+
 ### 8.1 为什么弃用厂商 SDK（硬性 ABI 不兼容）
 `libLHandProLib.so` 是在 **Ubuntu 22.04 / GCC 11** 上编的，要求
 `GLIBCXX_3.4.30` + **`GLIBC_2.34`**（还带 `GLIBC_2.32`）；而背包是 **Ubuntu 20.04 / glibc 2.31**、
@@ -258,7 +267,7 @@ r1_dual_arm_loco.cpp ──UDP 127.0.0.1:9998──> hand_bridge.py ──CANFD�
 ### 8.4 用法
 ```bash
 # ① 先起桥（会初始化两只手，回零约 4~5 s/只）
-~/r1_hand/hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1
+~/r1_hand/bridge.sh          # 封装，左右映射写在文件顶部，要调就改那里
 #   看到 "[bridge] ✅ 就绪：..." 再往下走
 # ② 另一个 tmux window 起遥操
 build/bin/r1_dual_arm_loco_skeleton eth10 --pico 9999 --variant a5 --hand canfd
@@ -293,6 +302,7 @@ build/bin/r1_dual_arm_loco_skeleton eth10 --pico 9999 --variant a5 --hand canfd
 | `r1_hand/hand_bridge.py` | **桥进程**：独占适配器 + 启动初始化 + 位置直接映射 |
 | `r1_hand/check_comms.py` | 只读通讯验证；`--scan` 按节点找总线上的手 |
 | `r1_hand/test_hand_canfd.py` | 编码器逐字节自检 → 双手初始化 → 运动 → 统计 |
+| `r1_hand/bridge.sh` | **起桥封装**：`LEFT_BUS/RIGHT_BUS/NODE/PORT` 默认值写在顶部，命令行多余参数透传 |
 | `r1_hand/hand_canfd.sh` | 跨平台入口（自动处理 macOS libusb 路径、`-u` 无缓冲；依赖目录按 `$R1_HAND_DIR` → 脚本目录 → `~/r1_hand` 查找） |
 | `r1_hand/{canfd_lib.py,gsusb_canfd/,usb/,hcanbus.rules}` | **vendor**（勿改）：厂商封装 + gs_usb 纯 Python 实现 + pyusb 1.2.1 + udev 规则 |
 | `r1_hand/README.md` | 该目录的说明：硬件、文件分工、来源/许可、平台差异、三个坑 |

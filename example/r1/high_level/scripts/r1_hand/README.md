@@ -21,9 +21,15 @@ USB-CANFD #1 ── 右手（node 1）
 
 > 2026-10-29 改的拓扑。以前是**一条总线挂两个节点（1/2）**，靠 node id 区分左右；
 > 现在两条总线上的 CAN ID 完全相同（都 `0x501`/`0x481`），靠**适配器**区分。
->
-> ⚠️ **哪条总线是哪只手不确定**：先 `./hand_canfd.sh hand_bridge.py --list` 看 serial，
-> 或起桥后只动一只手确认；搞反了就把 `--left-bus/--right-bus` 对调。
+
+| device_index | serial（实测） | 手 | 备注 |
+|---|---|---|---|
+| **0** | `F080207F308A3034` | **左手** | 2026-10-29 实测确认 |
+| **1** | `F0802068387F4D4D` | **右手** | 2026-10-29 实测确认 |
+
+> `device_index` 是**扫描顺序**，插拔/换口后**可能变**。若左右反了：
+> ① 直接对调 `--left-bus/--right-bus`；② 或改 `bridge.sh` 顶部的 `LEFT_BUS/RIGHT_BUS`。
+> 判据：起桥时日志先打 `[left] 使能/回零` —— 此时**左手**动就对，右手动就是反了。
 
 ## 文件
 
@@ -36,6 +42,7 @@ USB-CANFD #1 ── 右手（node 1）
 | `test_hand_canfd.py` | 编码器逐字节自检（对照厂商示例帧）→ 双手初始化 → 运动 → 总线统计 |
 | `check_comms.py` | 只读通讯验证；`--scan` 按节点找出总线上有哪几只手上报 |
 | `hand_canfd.sh` | **统一入口**：自动处理 macOS 的 libusb 路径、`python3 -u`（无缓冲）、依赖目录查找 |
+| `bridge.sh` | **起桥的封装**：左右映射/节点号/端口作为默认值写在文件顶部，要调就改这里（也可用环境变量覆盖） |
 
 ### vendor 进来的（**不要改**）
 
@@ -63,8 +70,12 @@ USB-CANFD #1 ── 右手（node 1）
 # 3) 双手运动测试（会让手真的动）
 ./hand_canfd.sh test_hand_canfd.py --position 1000 --sweep
 
-# 4) 起桥（给遥操程序用；必须早于遥操）
-./hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1
+# 4) 起桥（给遥操程序用；必须早于遥操）——推荐用封装，默认值写在文件顶部
+./bridge.sh
+
+#    等价于（要临时调映射就用这个形式）：
+#    ./hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1
+#    左右反了：./bridge.sh 前加 LEFT_BUS=1 RIGHT_BUS=0
 ```
 
 > `--left-bus/--right-bus` 默认就是 `0/1`；`--node` 默认 `1`（两只手相同）。

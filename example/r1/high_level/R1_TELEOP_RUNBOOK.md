@@ -135,7 +135,7 @@ example/r1/high_level/scripts/loco.sh status    # 复验：必须 811
 
 ```bash
 tmux new-session -d -s hand \
-  "cd ~/r1_hand && ./hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1 > /tmp/hand_bridge.log 2>&1"
+  "cd ~/r1_hand && ./bridge.sh > /tmp/hand_bridge.log 2>&1"
 sleep 15 && cat /tmp/hand_bridge.log
 ```
 
