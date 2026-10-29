@@ -70,7 +70,7 @@ def scan_nodes(args) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="灵巧手 CANFD 通讯验证（只读，双总线）")
+    ap = argparse.ArgumentParser(allow_abbrev=False, description="灵巧手 CANFD 通讯验证（只读，双总线）")
     ap.add_argument("--left-bus", type=int, default=0, help="左手适配器序号（-1=不接）")
     ap.add_argument("--right-bus", type=int, default=1, help="右手适配器序号（-1=不接）")
     ap.add_argument("--node", type=int, default=DEFAULT_NODE_HINT,

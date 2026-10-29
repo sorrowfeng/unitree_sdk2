@@ -89,7 +89,7 @@ def list_adapters() -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="灵巧手 CANFD 桥（遥操位置 → CAN，双总线）")
+    ap = argparse.ArgumentParser(allow_abbrev=False, description="灵巧手 CANFD 桥（遥操位置 → CAN，双总线）")
     ap.add_argument("--left-bus", type=int, default=0,
                     help="左手所在的 USB-CANFD 适配器序号（-1=不接左手）")
     ap.add_argument("--right-bus", type=int, default=1,
