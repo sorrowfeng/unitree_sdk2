@@ -99,6 +99,10 @@ void printUsage(const char* prog) {
     "                            由它独占 CANFD 适配器落到手上；需**先起桥**（桥在启动时\n"
     "                            完成 使能→回零→位置模式→速度→电流，约 12 s/两只手）。\n"
     "                            急停/掉包/保持/回零时本端不下发，手保持在最后位置。\n"
+    "  --engage-vel <rad/s>      首次接管时的「缓起步」限速（默认 1.0 ≈57°/s）。\n"
+    "                            启动后第一个遥操目标到达时，双臂从当前姿态（通常是放下）\n"
+    "                            **慢慢**过去，而不是用 30 rad/s 猛地甩到遥操姿态；\n"
+    "                            追上目标后自动恢复正常限速，正常遥操不受影响。\n"
     "  --vx --vy --vyaw          初始移动速度\n"
     "stdin(非pico): v vx vy vyaw | s | d | t | q\n";
 }
@@ -123,6 +127,7 @@ int main(int argc, char** argv) {
   std::string pico_source = "controllers";  // controllers=原始(对齐宇树) / teleop=校准后端点
   std::string hand_mode = "null";           // 灵巧手驱动：null（默认，只打印）/ canfd（走 UDP 桥）
   int hand_port = 9998;                     // canfd 模式：hand_bridge.py 的监听端口
+  double engage_vel = -1.0;                 // 缓起步限速 rad/s；<0 = 用控制器默认（见 Params）
   double vx = 0.0, vy = 0.0, vyaw = 0.0;
 
   for (int i = 2; i < argc; ++i) {
@@ -164,6 +169,12 @@ int main(int argc, char** argv) {
                   << " (expect null|canfd[:port])" << std::endl;
         return 1;
       }
+    } else if (a == "--engage-vel" && i + 1 < argc) {
+      engage_vel = std::atof(argv[++i]);
+      if (!(engage_vel > 0.0)) {
+        std::cerr << "[main] --engage-vel 必须 > 0（期望的缓起步限速，rad/s）" << std::endl;
+        return 1;
+      }
     }
   }
 
@@ -190,6 +201,8 @@ int main(int argc, char** argv) {
   // ---- 手臂控制器（内部：lowstate 订阅 + 250Hz 发布） ----
   r1skeleton::R1ArmController::Params arm_params;
   arm_params.motion_mode = motion_mode;
+  // 缓起步：首次接管时用低限速从"实测姿态"慢慢追到遥操目标，避免猛地抬起
+  if (engage_vel > 0.0) arm_params.engage_vel_limit = engage_vel;
   r1skeleton::R1ArmController arm(
       use_a7 ? r1skeleton::R1ArmController::Variant::R1_A7
              : r1skeleton::R1ArmController::Variant::R1_A5,
@@ -540,6 +553,10 @@ int main(int argc, char** argv) {
       if (!ever_safe) {
         ever_safe = true;
         first_exec_pkt.store(true);
+        // 首个可执行包 = 第一次真的要跟着遥操走。此时臂通常还垂在体侧，
+        // 到遥操姿态有一大段距离 —— 请求一次「缓起步」，让控制器用低限速慢慢过去，
+        // 而不是用 30 rad/s 在几十毫秒内甩上去（实测过：会猛地抬起，很危险）。
+        arm.requestEngagement();
       }
 
       // ——双臂：所选来源位姿 -> OpenXR 4x4 -> 对齐 -> IK——

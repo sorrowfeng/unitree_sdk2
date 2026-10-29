@@ -63,13 +63,14 @@ tmux kill-server
 
 ---
 
-## 三条判据（一行一个）
+## 几条判据（一行一个）
 
 | 看到这个 | 说明 |
 |---|---|
 | 中继计数在涨 | PICO → Mac 通了 |
 | `[pico] first packet … operator_mode="active_stream"` | PICO → 背包通了 |
 | `[hand] CANFD 桥驱动就绪` + `[main] ready.` | 可以开始遥操了 |
+| `[arm] 缓起步：限速 1.0 rad/s…` → `[arm] 缓起步结束` | **首次接管是慢慢抬到遥操姿态**（约 1~3 s），不是猛甩 —— 正常 |
 
 ## FSM 对照（`loco.sh status` 看 `current fsm_id`）
 

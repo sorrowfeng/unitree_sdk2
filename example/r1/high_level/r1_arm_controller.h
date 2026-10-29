@@ -76,6 +76,18 @@ class R1ArmController {
     // ⚠️ 与 arm_vel_limit 一起看：领先量 = vel_limit/publish_hz，太小（如 vel=2 ⇒ 0.46°）
     //    会因力矩低于静摩擦而死锁 —— 详见 clipTargets() 的注释。
     double arm_cmd_lag_max = 0.35;
+    // —— 缓起步（engagement）——
+    // 首次接管 / 重新对齐时，指令从"实测姿态"（通常是手臂自然垂下）追到遥操目标。
+    // 若直接用 arm_vel_limit(30 rad/s) 追，几十毫秒就甩过去 —— 实测就是这个现象：
+    //   启动后第一个 JSON 包到达时，双臂从放下**猛地抬起**到遥操姿态。
+    // 所以先用 engage_vel_limit 慢慢过去，各关节都追进 engage_tol 后再恢复正常限速。
+    // 正常遥操（已经追上之后）完全不受影响。
+    double engage_vel_limit = 1.0;    // rad/s（≈57°/s）；设 <=0 关闭缓起步
+    double engage_tol = 0.05;         // rad，各关节都进这个范围即算"追上"
+    double engage_timeout_s = 6.0;    // 兜底：超时仍未追上（如目标不可达）就恢复正常限速
+    // 缓起步至少持续这么久：请求时刻遥操目标可能还等于"当前姿态"，
+    // 若不加这个下限会被立刻判成"已追上"而形同虚设。
+    double engage_min_s = 0.6;
     // 增益（与 xr_teleoperate 当前 head 提交一致）
     double kp_shoulder = 50.0, kd_shoulder = 2.0;   // 肩 pitch/roll
     double kp_elbow    = 40.0, kd_elbow    = 2.0;   // 肩 yaw / 肘
@@ -224,6 +236,11 @@ class R1ArmController {
     publisher_->msg_.mode_pr(static_cast<uint8_t>(std::lround(c * 100.0)));
     publisher_->unlock();
   }
+
+  /// 请求一次缓起步。主循环在「首个可执行 PICO 包」到达时调用：
+  /// 之后双臂会用 engage_vel_limit 从当前姿态（通常垂在体侧）慢慢追到遥操目标，
+  /// 而不是用 arm_vel_limit(30 rad/s) 在几十毫秒内猛甩上去。
+  void requestEngagement() { engage_req_.store(true); }
 
  private:
   // ---- 关节槽位表 --------------------------------------------------------
@@ -410,8 +427,38 @@ class R1ArmController {
       cmd_prev_ = cur;
     }
 
+    // 缓起步由主循环在「首个可执行 PICO 包」时显式请求（见 requestEngagement）。
+    // 不在这里按 cmd_reset_ 自动触发：start() 时目标还等于"当前姿态"，
+    // 那时进入缓起步会被立刻判成"已追上"而失效。
+    if (engage_req_.exchange(false)) {
+      engage_active_ = params_.engage_vel_limit > 0.0;
+      engage_begin_ = std::chrono::steady_clock::now();
+      if (engage_active_) {
+        std::cout << "[arm] 缓起步：限速 " << params_.engage_vel_limit
+                  << " rad/s，追到遥操目标后恢复 " << params_.arm_vel_limit << " rad/s"
+                  << std::endl;
+      }
+    }
+
     const double dt = 1.0 / params_.publish_hz;
-    const double allowed = params_.arm_vel_limit * dt;
+
+    // —— 缓起步阶段用低限速 ——
+    double vel_limit = params_.arm_vel_limit;
+    double engage_elapsed = 0.0;
+    if (engage_active_) {
+      engage_elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - engage_begin_).count();
+      if (engage_elapsed > params_.engage_timeout_s) {
+        engage_active_ = false;
+        std::cout << "[arm] 缓起步超时（" << params_.engage_timeout_s
+                  << " s 仍未追上目标，可能目标不可达/被卡住），恢复 "
+                  << params_.arm_vel_limit << " rad/s" << std::endl;
+      } else {
+        vel_limit = params_.engage_vel_limit;
+      }
+    }
+
+    const double allowed = vel_limit * dt;
     Eigen::VectorXd next(q.size());
     for (int i = 0; i < q.size(); ++i) {
       const double step = std::clamp(q[i] - cmd_prev_[i], -allowed, allowed);
@@ -423,8 +470,17 @@ class R1ArmController {
       next[i] = c;
       cmd_prev_[i] = c;
     }
+
+    // 各关节都追进 engage_tol ⇒ 缓起步完成（但至少持续 engage_min_s）
+    if (engage_active_ && engage_elapsed >= params_.engage_min_s &&
+        (next - q).cwiseAbs().maxCoeff() < params_.engage_tol) {
+      engage_active_ = false;
+      std::cout << "[arm] 缓起步结束：已追到遥操目标（用时 " << engage_elapsed
+                << " s），恢复 " << params_.arm_vel_limit << " rad/s" << std::endl;
+    }
     return next;
   }
+
 
   void setWeightAndPublish(double w) {
     const double c = std::clamp(w, 0.0, 1.0);
@@ -453,6 +509,10 @@ class R1ArmController {
   // 指令轨迹积分器（只有 250 Hz 发布线程访问 cmd_prev_；cmd_reset_ 由初始化线程置位）
   Eigen::VectorXd cmd_prev_;
   std::atomic<bool> cmd_reset_{true};
+  // 缓起步状态（只在 250 Hz 发布线程内读写，无需原子）
+  bool engage_active_ = false;
+  std::chrono::steady_clock::time_point engage_begin_{};
+  std::atomic<bool> engage_req_{false};   // 主循环请求一次缓起步
 };
 
 }  // namespace r1skeleton

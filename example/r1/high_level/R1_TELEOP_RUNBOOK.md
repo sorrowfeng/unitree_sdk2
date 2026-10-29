@@ -230,6 +230,17 @@ tmux kill-server 2>/dev/null                        # 清掉所有 tmux 会话
 
 ## 常见现象
 
+### 首次接管时双臂「慢慢抬起」—— 正常，是缓起步
+第一个可执行包到达时，双臂会从当前姿态（通常垂在体侧）**低速**移动到遥操姿态，
+日志有 `[arm] 缓起步：限速 1.0 rad/s…` 和 `[arm] 缓起步结束…`，全程约 1~3 s。
+这是为了避免 30 rad/s 在几十毫秒内甩上去（那样看着像猛地弹起，很危险）。
+觉得太慢/太快就调：
+```bash
+build/bin/r1_dual_arm_loco_skeleton eth10 --pico 9999 --variant a5 --hand canfd --engage-vel 2.0
+```
+（单位 rad/s；1.0 ≈ 57°/s。不传则默认 1.0。⚠️ 出现 `缓起步超时`（6 s 未追上）
+说明目标可能不可达或被卡住，那时会自动恢复正常限速。）
+
 ### 双臂动、手不动（或手不动）
 **首选查 `safe_to_execute`**：PICO 端 App 的 8 项 AND 闸门（连续发送 + 已使能 + 未急停 +
 session running/focused + **左右手都已校准** + 追踪 live + 样本新鲜 ≤250 ms）。
