@@ -35,7 +35,7 @@ example/r1/high_level/scripts/loco.sh status   # 复验：必须 811
 
 ```bash
 # 灵巧手桥（必须早于遥操；启动时两只手会各回零一次，约 12 s）
-tmux new -d -s hand "cd ~/r1_hand && ./hand_canfd.sh hand_bridge.py --left 1 --right 2 > /tmp/hand_bridge.log 2>&1"
+tmux new -d -s hand "cd ~/r1_hand && ./hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1 > /tmp/hand_bridge.log 2>&1"
 sleep 15; grep "就绪" /tmp/hand_bridge.log       # 要看到：✅ 就绪：[1, 2] 已进入位置模式
 
 # 遥操

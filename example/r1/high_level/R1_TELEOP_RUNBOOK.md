@@ -89,16 +89,19 @@ ssh unitree@192.168.123.164 'cd ~/unitree_sdk2 && \
 判据：两个 `grep` 都 ≥ 1，且 `bin` 的 mtime **晚于**源码。
 （✅ 用 `grep -ac`；❌ **不要**用 `strings | grep 中文` —— UTF-8 中文会被截断，永远返回 0。）
 
-**灵巧手整套也要同步**（它不在 CMake 里，`deploy_backpack.sh` 不会带）：
+**灵巧手那套是自动带来的**（2026-10-29 起）：
 
-```bash
-# 源就是仓库里的 scripts/r1_hand/（自包含：含 vendor 依赖）
-# _vm_rsync.exp 的签名：<密码> <port> <user> <host> <src> <dst>
-example/r1/high_level/scripts/_vm_rsync.exp <密码> 22 unitree 192.168.123.164 \
-  example/r1/high_level/scripts/r1_hand/ /home/unitree/r1_hand/
-```
+`scripts/r1_hand/` 在 `example/r1/` 里 ⇒ 上面的 `deploy_backpack.sh` 会**一并同步**到背包的
+`~/unitree_sdk2/example/r1/high_level/scripts/r1_hand/`；背包上的 `~/r1_hand` 是指向它的**软链接**。
+⇒ **不需要再单独 rsync 一次**。
+
 > 该目录**纯 Python、无需 pip**（vendor 了 `canfd_lib.py` + `gsusb_canfd/` + pyusb **1.2.1**）。
 > ⚠️ pyusb 必须 1.2.1（1.3.x 要求 Python ≥ 3.9，背包是 3.8）。详见其 `README.md`。
+>
+> 验证到了没有：
+> ```bash
+> ssh unitree@192.168.123.164 'ls -ld ~/r1_hand && ~/r1_hand/hand_canfd.sh test_hand_canfd.py --selfcheck | tail -1'
+> ```
 
 ## 5️⃣ 背包：运行前检查
 
@@ -132,7 +135,7 @@ example/r1/high_level/scripts/loco.sh status    # 复验：必须 811
 
 ```bash
 tmux new-session -d -s hand \
-  "cd ~/r1_hand && ./hand_canfd.sh hand_bridge.py --left 1 --right 2 > /tmp/hand_bridge.log 2>&1"
+  "cd ~/r1_hand && ./hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1 > /tmp/hand_bridge.log 2>&1"
 sleep 15 && cat /tmp/hand_bridge.log
 ```
 

@@ -206,8 +206,14 @@ LocoClient ──▶ 机载运控 ai_sport（站立/行走/阻尼/零力矩）
 ## 8. 灵巧手（CANFD 直控，2026-10-09 落地）
 
 **实际硬件**：LHandPro **`DH116S-L000-A1`(左) / `DH116S-R000-A1`(右)**，各 6 自由度。
-USB-CANFD 适配器 **`a8fa:8598`**（Com Equipment "CANFD Analyser"，gs_usb 用户态协议），
-两只手挂**同一条总线**，靠 **node id** 区分（默认 1 / 2）。
+USB-CANFD 适配器 **`a8fa:8598`**（Com Equipment "CANFD Analyser"，gs_usb 用户态协议）。
+**两条独立的适配器/总线，各挂一只手，两只手的 node id 都是 `1`**，靠**总线**区分左右：
+```
+USB-CANFD #0 ── 左手（node 1）
+USB-CANFD #1 ── 右手（node 1）
+```
+> 2026-10-29 改的拓扑：以前是**一条总线挂两个节点（1/2）**，靠 node id 区分左右；
+> 现在两条总线上的 CAN ID 完全相同（都 `0x501`/`0x481`），靠适配器区分，互不干扰。
 
 ### 8.1 为什么弃用厂商 SDK（硬性 ABI 不兼容）
 `libLHandProLib.so` 是在 **Ubuntu 22.04 / GCC 11** 上编的，要求
@@ -238,7 +244,7 @@ C++ 侧要用 gs_usb 就得在背包上编译 `gsusb-canfd` 的 C++ 库；而 Py
 
 ```
 r1_dual_arm_loco.cpp ──UDP 127.0.0.1:9998──> hand_bridge.py ──CANFD──> 两只手
-   （--hand canfd）        "POS l0..l5 r0..r5 mask"      独占适配器
+   （--hand canfd）        "POS l0..l5 r0..r5 mask"   独占两个适配器
 ```
 
 - **C++**：`r1_hand_canfd_bridge.h` 的 `CanfdBridgeHandDriver` 实现现有 `HandDriver` 接口，
@@ -252,7 +258,7 @@ r1_dual_arm_loco.cpp ──UDP 127.0.0.1:9998──> hand_bridge.py ──CANFD�
 ### 8.4 用法
 ```bash
 # ① 先起桥（会初始化两只手，回零约 4~5 s/只）
-~/r1_hand/hand_canfd.sh hand_bridge.py --left 1 --right 2
+~/r1_hand/hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1
 #   看到 "[bridge] ✅ 就绪：..." 再往下走
 # ② 另一个 tmux window 起遥操
 build/bin/r1_dual_arm_loco_skeleton eth10 --pico 9999 --variant a5 --hand canfd

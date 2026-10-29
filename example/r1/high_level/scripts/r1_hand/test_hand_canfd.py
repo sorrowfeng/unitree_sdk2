@@ -5,21 +5,28 @@
 流程与厂商"运动最小示例"完全一致，只是把帧改成自己组：
     使能 → 回零(等5s) → 位置模式 → 速度 → 电流上限 → 位置
 
+拓扑（**两条总线，各一只手，node 都是 1**）：
+    USB-CANFD #0 ── 左手（node 1）
+    USB-CANFD #1 ── 右手（node 1）
+
 用法::
 
-    python3 test_hand_canfd.py --selfcheck          # 只做逐字节自检，不碰硬件
-    python3 test_hand_canfd.py --nodes 1 2          # 实发：两只手都动
-    python3 test_hand_canfd.py --nodes 1 --sweep    # 单手来回扫
+    python3 test_hand_canfd.py --selfcheck            # 只做逐字节自检，不碰硬件
+    python3 test_hand_canfd.py                        # 实发：左右手都动（默认总线 0/1）
+    python3 test_hand_canfd.py --left-bus 0           # 只动左手
+    python3 test_hand_canfd.py --sweep                # 双手来回扫
 """
 
 import argparse
 import sys
 import time
+from typing import List
 
 from hand_canfd import (
     AXES, CMD_CURRENT, CMD_MODE, CMD_POSITION, CMD_VELOCITY,
-    DEFAULT_CURRENT, DEFAULT_VELOCITY, MODE_ENABLE, MODE_HOME, MODE_POSITION,
-    POSITION_MAX, LHandCanfd, build_payload,
+    DEFAULT_CURRENT, DEFAULT_NODE_HINT, DEFAULT_VELOCITY,
+    MODE_ENABLE, MODE_HOME, MODE_POSITION,
+    HandBus, LHandCanfd, build_payload,
 )
 
 # 厂商给出的"运动最小示例"原始帧 —— 用来逐字节验证我们的编码器
@@ -51,9 +58,11 @@ def selfcheck() -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="双手灵巧手 CANFD 直控测试")
-    ap.add_argument("--nodes", type=int, nargs="+", default=[1, 2],
-                    help="手 node id 列表（默认 1 2）")
+    ap = argparse.ArgumentParser(description="双手灵巧手 CANFD 直控测试（双总线）")
+    ap.add_argument("--left-bus", type=int, default=0, help="左手适配器序号（-1=不接）")
+    ap.add_argument("--right-bus", type=int, default=1, help="右手适配器序号（-1=不接）")
+    ap.add_argument("--node", type=int, default=DEFAULT_NODE_HINT,
+                    help=f"节点号（两条总线相同，默认 {DEFAULT_NODE_HINT}）")
     ap.add_argument("--selfcheck", action="store_true", help="只做编码器自检，不碰硬件")
     ap.add_argument("--nom-baudrate", type=int, default=1_000_000)
     ap.add_argument("--dat-baudrate", type=int, default=5_000_000)
@@ -74,7 +83,17 @@ def main() -> int:
     if args.selfcheck:
         return 0
 
-    bus = LHandCanfd(nom_baudrate=args.nom_baudrate,
+    hands: List[HandBus] = []
+    if args.left_bus >= 0:
+        hands.append(HandBus("left", device_index=args.left_bus, node=args.node))
+    if args.right_bus >= 0:
+        hands.append(HandBus("right", device_index=args.right_bus, node=args.node))
+    if not hands:
+        print("至少要给一条总线（--left-bus / --right-bus，-1 表示不接）", file=sys.stderr)
+        return 2
+
+    bus = LHandCanfd(hands=hands,
+                     nom_baudrate=args.nom_baudrate,
                      dat_baudrate=args.dat_baudrate,
                      log_frames=args.verbose)
     try:
@@ -83,8 +102,8 @@ def main() -> int:
         # ---- 1. 逐手初始化：使能 → 回零 → 位置模式 → 速度/电流 ----
         # 注意：默认**不开**反馈上报（运动不需要）；要读状态加 --feedback
         print(f"反馈上报: {'开启' if args.feedback else '关闭（默认，运动不需要）'}")
-        for node in args.nodes:
-            bus.init_hand(node, home_wait=args.home_wait,
+        for side in bus.sides:
+            bus.init_hand(side, home_wait=args.home_wait,
                           velocity=args.velocity, current=args.current,
                           feedback=args.feedback)
 
@@ -95,23 +114,24 @@ def main() -> int:
             (0, "回零位"), (target // 2, f"到 {target // 2}"), (0, "回零位"),
         ]
         for pos, label in plan:
-            for node in args.nodes:
-                print(f"[hand {node}] {label}: position={pos}")
-                bus.set_position(node, pos)
+            for side in bus.sides:
+                print(f"[{side}] {label}: position={pos}")
+                bus.set_position(side, pos)
             print(f"  等待 {args.rx_wait:g}s ...")
             time.sleep(args.rx_wait)
 
         # ---- 3. 总线统计：区分"自己的回环"与"设备真正的反馈" ----
         time.sleep(0.5)
-        fb = bus.fb_by_node
+        fb = bus.fb_by_side
         print(f"\n=== 总线统计 ===")
         print(f"  RX 总帧数     : {bus.rx_count}")
         print(f"  其中 TX 回环  : {bus.echo_count}    ← 适配器把自己的发送回显，**不是**手的反馈")
-        print(f"  设备反馈帧    : {sum(fb.values())}   {fb if fb else '（0x480+node / 0x580+node 上一帧都没收到）'}")
+        print(f"  设备反馈帧    : {sum(fb.values())}   "
+              f"{fb if fb else '（0x480+node / 0x580+node 上一帧都没收到）'}")
         if bus.other_ids:
             print(f"  其它 CAN ID   : {bus.other_ids}")
-        for node, data in bus.last_fb.items():
-            print(f"  node {node} 最后一帧反馈: {data[:24].hex(' ').upper()}"
+        for side, data in bus.last_fb.items():
+            print(f"  {side} 最后一帧反馈: {data[:24].hex(' ').upper()}"
                   + (" ..." if len(data) > 24 else ""))
         if not fb:
             print("\n  ⚠ 没收到设备反馈。可能：① 手没接好/没上电；② 本固件只在特定事件才回帧。")

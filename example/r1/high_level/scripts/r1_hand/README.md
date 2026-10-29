@@ -3,18 +3,27 @@
 > 这是**灵巧手控制那一整套**，一个目录装齐、可直接搬到机器人上跑，**不需要联网、不需要 pip**。
 > 协议细节与架构 → 仓库根目录 `AGENTS.md` **§8**。
 >
-> **部署映射**：本目录 ⟷ 背包上的 `~/r1_hand/`
-> ```bash
-> # 从仓库同步到背包（在仓库根目录执行）
-> example/r1/high_level/scripts/_vm_rsync.exp <密码> 22 unitree 192.168.123.164 \
->   example/r1/high_level/scripts/r1_hand/ /home/unitree/r1_hand/
-> ```
+> **部署**：本目录在 `example/r1/` 里 ⇒ `deploy_backpack.sh --incremental` 会**一并同步**到背包的
+> `~/unitree_sdk2/example/r1/high_level/scripts/r1_hand/`；背包上的 `~/r1_hand` 是指向它的**软链接**，
+> 所以命令不用改，也不会出现"两份不一致"。（以前要单独 rsync 一次，**现在不用了**。）
 
 ## 硬件
 
 LHandPro **`DH116S-L000-A1`(左) / `DH116S-R000-A1`(右)**，各 6 自由度，
 USB-CANFD 适配器 **`a8fa:8598`**（Com Equipment "CANFD Analyser"，gs_usb 用户态协议）。
-两只手挂**同一条总线**，靠 **node id** 区分（默认 **1=左 / 2=右**）。
+
+**两条独立的总线，各挂一只手，两只手的 node id 都是 `1`**：
+
+```
+USB-CANFD #0 ── 左手（node 1）
+USB-CANFD #1 ── 右手（node 1）
+```
+
+> 2026-10-29 改的拓扑。以前是**一条总线挂两个节点（1/2）**，靠 node id 区分左右；
+> 现在两条总线上的 CAN ID 完全相同（都 `0x501`/`0x481`），靠**适配器**区分。
+>
+> ⚠️ **哪条总线是哪只手不确定**：先 `./hand_canfd.sh hand_bridge.py --list` 看 serial，
+> 或起桥后只动一只手确认；搞反了就把 `--left-bus/--right-bus` 对调。
 
 ## 文件
 
@@ -44,15 +53,22 @@ USB-CANFD 适配器 **`a8fa:8598`**（Com Equipment "CANFD Analyser"，gs_usb �
 # 0) 只读自检（不碰硬件）
 ./hand_canfd.sh test_hand_canfd.py --selfcheck
 
-# 1) 找总线上有哪几只手
-./hand_canfd.sh check_comms.py --scan --scan-max 4 --quiet
+# 1) 看有几个适配器、各自的 serial（用来确认哪条总线是哪只手）
+./hand_canfd.sh hand_bridge.py --list
 
-# 2) 双手运动测试（会让手真的动）
-./hand_canfd.sh test_hand_canfd.py --nodes 1 2 --position 1000 --sweep
+# 2) 只读通讯验证（两条总线各验一次，不发运动指令）
+./hand_canfd.sh check_comms.py --quiet
+./hand_canfd.sh check_comms.py --scan --scan-max 4 --quiet    # 顺便确认节点号
 
-# 3) 起桥（给遥操程序用；必须早于遥操）
-./hand_canfd.sh hand_bridge.py --left 1 --right 2
+# 3) 双手运动测试（会让手真的动）
+./hand_canfd.sh test_hand_canfd.py --position 1000 --sweep
+
+# 4) 起桥（给遥操程序用；必须早于遥操）
+./hand_canfd.sh hand_bridge.py --left-bus 0 --right-bus 1
 ```
+
+> `--left-bus/--right-bus` 默认就是 `0/1`；`--node` 默认 `1`（两只手相同）。
+> 只接一只手时把另一条设成 `-1`，例如 `--left-bus 0 --right-bus -1`。
 
 配合遥操：**先起桥**，再起遥操程序并加 `--hand canfd`（见 `../R1_TELEOP_QUICKSTART.md`）。
 
@@ -74,11 +90,14 @@ USB-CANFD 适配器 **`a8fa:8598`**（Com Equipment "CANFD Analyser"，gs_usb �
 2. **脚本自己所在的目录**（= 本目录，仓库里直接可用）
 3. `~/r1_hand`（背包上的部署位置）
 
-## 三个最容易踩的坑
+## 四个最容易踩的坑
 
-1. **适配器把自己发的帧"回环"回来**（CAN ID 就是 `0x500+node`）—— 那不是手的反馈，
+1. **哪条总线是哪只手**（双总线新拓扑）—— 两条总线上 node 都是 1、CAN ID 完全相同，
+   只能靠 `device_index` 区分。`device_index` 是扫到适配器的**顺序**，插拔后可能变。
+   ⇒ 起桥后**只动一只手**确认；搞反了把 `--left-bus/--right-bus` 对调即可。
+2. **适配器把自己发的帧"回环"回来**（CAN ID 就是 `0x500+node`）—— 那不是手的反馈，
    必须与 `0x480+node` 的真反馈分开统计，否则会得出"手在应答"的假象。
-2. **`00 02 50 01` 不是运动的前置条件** —— 它只是"开启异步反馈上报"，
+3. **`00 02 50 01` 不是运动的前置条件** —— 它只是"开启异步反馈上报"，
    开了之后设备约 **1000 帧/秒**持续上报（逐帧打印会淹没一切，长跑记得 `log_frames=False`）。
-3. **适配器 USB 不稳**：`a8fa:8598` 会反复 disconnect→重枚举（Artery MCU 的
+4. **适配器 USB 不稳**：`a8fa:8598` 会反复 disconnect→重枚举（Artery MCU 的
    bootloader→firmware 切换）。掉了就重插。

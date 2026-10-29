@@ -12,6 +12,15 @@
   1. **启动时**走完初始化：使能 → 回零(等 --home-wait) → 位置模式 → 速度 → 电流上限
   2. 之后只做**直接映射**：`遥操位置 → set_position`（不再做任何换算）
 
+拓扑（2026-10-29 起：两条总线）
+------------------------------
+    USB-CANFD #0（--left-bus 0）── 左手，node 1
+    USB-CANFD #1（--right-bus 1）── 右手，node 1
+
+两只手的 **node id 都是 1**，靠**总线**区分左右（以前是一条总线挂 1/2 两个节点）。
+不确定哪条总线是哪只手时，先 `--list` 看适配器，或跑起来之后只动一只手确认；
+搞反了就把 `--left-bus/--right-bus` 对调。
+
 安全语义
 --------
 主程序只在**遥操分支**发 `POS`；急停/掉包/保持/回零时它**什么都不发**。
@@ -20,8 +29,11 @@
 
 用法
 ----
-    # 先起桥（它会做初始化，两只手会回零，约 12 s）
-    python3 hand_bridge.py --left 1 --right 2
+    # 先看有几个适配器（可选）
+    python3 hand_bridge.py --list
+
+    # 起桥（会做初始化，两只手各回零一次，约 12 s）
+    python3 hand_bridge.py --left-bus 0 --right-bus 1
 
     # 再起遥操主程序
     build/bin/r1_dual_arm_loco_skeleton eth10 --pico 9999 --variant a5 --hand canfd
@@ -36,7 +48,7 @@ import time
 from typing import Dict, List, Optional
 
 from hand_canfd import (
-    DEFAULT_CURRENT, DEFAULT_VELOCITY, POSITION_MAX, LHandCanfd,
+    DEFAULT_CURRENT, DEFAULT_VELOCITY, POSITION_MAX, HandBus, LHandCanfd,
 )
 
 FRAME_PREFIX = "POS"
@@ -60,10 +72,30 @@ def parse_pos(line: str) -> Optional[Dict[str, object]]:
     return out
 
 
+def list_adapters() -> int:
+    adapters = LHandCanfd._probe_adapters()
+    if adapters is None:
+        print("拿不到适配器列表（gsusb_canfd 不可用？）", file=sys.stderr)
+        return 1
+    if not adapters:
+        print("没有扫到 USB-CANFD 适配器（检查 USB / udev 权限）", file=sys.stderr)
+        return 1
+    print(f"扫到 {len(adapters)} 个 USB-CANFD 适配器（device_index 就是下面的序号）：")
+    for i, a in enumerate(adapters):
+        print(f"  #{i}  serial={getattr(a, 'serial', '?')!r}  "
+              f"bus={getattr(a, 'bus', '?')}  addr={getattr(a, 'address', '?')}  "
+              f"product={getattr(a, 'product', '?')!r}")
+    return 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="灵巧手 CANFD 桥（遥操位置 → CAN）")
-    ap.add_argument("--left", type=int, default=1, help="左手 node id（0=不接左手）")
-    ap.add_argument("--right", type=int, default=2, help="右手 node id（0=不接右手）")
+    ap = argparse.ArgumentParser(description="灵巧手 CANFD 桥（遥操位置 → CAN，双总线）")
+    ap.add_argument("--left-bus", type=int, default=0,
+                    help="左手所在的 USB-CANFD 适配器序号（-1=不接左手）")
+    ap.add_argument("--right-bus", type=int, default=1,
+                    help="右手所在的 USB-CANFD 适配器序号（-1=不接右手）")
+    ap.add_argument("--node", type=int, default=1,
+                    help="两条总线上的节点号（默认 1，两只手相同）")
     ap.add_argument("--port", type=int, default=9998, help="监听 cpp 端发来的位置")
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--home-wait", type=float, default=5.0, help="每只手回零等待秒数")
@@ -78,14 +110,23 @@ def main() -> int:
                     help="跳过初始化（手已经初始化过时用，避免再次回零）")
     ap.add_argument("--verbose", action="store_true",
                     help="逐帧打印 CAN 收发（排查用；正常别开——开启反馈后约 1000 帧/秒会刷屏）")
+    ap.add_argument("--list", action="store_true", help="列出 USB-CANFD 适配器后退出")
     args = ap.parse_args()
 
-    nodes: List[int] = [n for n in (args.left, args.right) if n > 0]
-    if not nodes:
-        print("至少要给一个 --left / --right node id", file=sys.stderr)
-        return 2
+    if args.list:
+        return list_adapters()
 
-    bus = LHandCanfd(log_frames=args.verbose, log=print)
+    hands: List[HandBus] = []
+    if args.left_bus >= 0:
+        hands.append(HandBus("left", device_index=args.left_bus, node=args.node))
+    if args.right_bus >= 0:
+        hands.append(HandBus("right", device_index=args.right_bus, node=args.node))
+    if not hands:
+        print("至少要给一条总线（--left-bus / --right-bus，-1 表示不接）", file=sys.stderr)
+        return 2
+    sides = [h.side for h in hands]
+
+    bus = LHandCanfd(hands=hands, log_frames=args.verbose, log=print)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind((args.bind, args.port))
@@ -100,17 +141,18 @@ def main() -> int:
         if args.no_init:
             print("[bridge] --no-init：跳过初始化（假定手已使能并切到位置模式）")
         else:
-            print(f"[bridge] 开始初始化 {nodes}（每只手 使能 → 回零{args.home_wait:g}s → "
-                  f"位置模式 → 速度{args.velocity} → 电流{args.current}）")
-            for node in nodes:
-                bus.init_hand(node, home_wait=args.home_wait,
+            desc = "，".join(f"{h.side}=总线#{h.device_index}/node{h.node}" for h in hands)
+            print(f"[bridge] 开始初始化（{desc}）；每只手 使能 → 回零{args.home_wait:g}s → "
+                  f"位置模式 → 速度{args.velocity} → 电流{args.current}")
+            for side in sides:
+                bus.init_hand(side, home_wait=args.home_wait,
                               enable_wait=args.enable_wait,
                               velocity=args.velocity, current=args.current,
                               feedback=args.feedback)
-        print(f"[bridge] ✅ 就绪：{nodes} 已进入位置模式，开始接收遥操位置 "
+        print(f"[bridge] ✅ 就绪：{sides} 已进入位置模式，开始接收遥操位置 "
               f"（下发 ≤{args.rate:g} Hz，{args.timeout:g}s 无新位置即保持）")
 
-        last_targets: Dict[int, List[int]] = {}
+        last_targets: Dict[str, List[int]] = {}
         last_rx = 0.0
         last_send = 0.0
         stale_warned = False
@@ -126,10 +168,10 @@ def main() -> int:
                 n_frames += 1
                 last_rx = now
                 stale_warned = False
-                if "left" in msg and args.left > 0:
-                    last_targets[args.left] = msg["left"]           # type: ignore[assignment]
-                if "right" in msg and args.right > 0:
-                    last_targets[args.right] = msg["right"]         # type: ignore[assignment]
+                if "left" in msg and "left" in sides:
+                    last_targets["left"] = msg["left"]           # type: ignore[assignment]
+                if "right" in msg and "right" in sides:
+                    last_targets["right"] = msg["right"]         # type: ignore[assignment]
             except socket.timeout:
                 pass
 
@@ -144,11 +186,11 @@ def main() -> int:
             if now - last_send < 1.0 / max(1.0, args.rate):
                 continue
             last_send = now
-            for node, vals in last_targets.items():
+            for side, vals in last_targets.items():
                 try:
-                    bus.set_positions(node, vals)      # 直接映射，不做任何换算
+                    bus.set_positions(side, vals)      # 直接映射，不做任何换算
                 except Exception as exc:  # noqa: BLE001
-                    print(f"[bridge] ✗ node {node} 下发失败: {exc}")
+                    print(f"[bridge] ✗ {side} 下发失败: {exc}")
                     last_rx = 0.0   # 触发保持，避免刷屏
 
     except KeyboardInterrupt:
@@ -158,7 +200,7 @@ def main() -> int:
         return 1
     finally:
         print(f"[bridge] 关闭。RX 帧数={locals().get('n_frames', 0)}，"
-              f"设备反馈={bus.fb_by_node if hasattr(bus, 'fb_by_node') else {}}")
+              f"设备反馈={bus.fb_by_side}")
         try:
             bus.close()
         finally:

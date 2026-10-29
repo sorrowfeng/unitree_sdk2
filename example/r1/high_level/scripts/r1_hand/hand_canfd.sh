@@ -2,9 +2,9 @@
 # 灵巧手 CANFD 工具的统一入口 —— 自动处理平台差异，不用记环境变量。
 #
 # 用法（Mac 与背包通用）:
-#   hand_canfd.sh check_comms.py --nodes 1 2              # 只读通讯验证
+#   hand_canfd.sh check_comms.py --left-bus 0 --right-bus 1    # 只读通讯验证
 #   hand_canfd.sh check_comms.py --scan --scan-max 8      # 扫 node，找总线上的手
-#   hand_canfd.sh test_hand_canfd.py --nodes 1 2 --position 1000
+#   hand_canfd.sh test_hand_canfd.py --position 1000
 #
 # 依赖目录（需含 canfd_lib.py / gsusb_canfd/ / usb/）按顺序找：
 #   $R1_HAND_DIR  →  ~/r1_hand  →  脚本自身所在目录
